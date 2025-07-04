@@ -1,0 +1,7 @@
+name = "auto-login-worker"
+main = "worker.js"
+compatibility_date = "2025-07-04"
+[[triggers]]
+schedule = [{cron = "0 0 */10 * *"}]
+
+[env.production]
