@@ -1,0 +1,36 @@
+name: Auto Login Worker Deployment
+
+on:
+  schedule:
+    - cron: '0 0 */10 * *' # 每十天 UTC 时间午夜运行
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Wrangler
+        run: npm install -g wrangler
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Configure Wrangler
+        run: |
+          echo "WRANGLER_AUTH_KEY=${{ secrets.CLOUDFLARE_API_TOKEN }}" >> $GITHUB_ENV
+          echo "ACCOUNT_ID=${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" >> $GITHUB_ENV
+
+      - name: Deploy to Cloudflare Workers
+        run: wrangler deploy --env production
+        env:
+          EMAIL: ${{ secrets.EMAIL }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+
+      - name: Verify Deployment
+        run: wrangler whoami
