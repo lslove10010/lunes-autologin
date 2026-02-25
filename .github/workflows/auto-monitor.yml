@@ -20,13 +20,16 @@ jobs:
       with:
         python-version: '3.11'
 
+    - name: Install Chrome
+      run: |
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
+
     - name: Install dependencies
       run: |
         pip install -r requirements.txt
-
-    - name: Install Playwright browsers
-      run: |
-        playwright install chromium
 
     - name: Run monitor script
       env:
@@ -34,5 +37,6 @@ jobs:
         LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        GITHUB_ACTIONS: "true"  # 标记在 GitHub Actions 环境运行
       run: |
-        python scripts/monitor.py
+        python scripts/monitor_drission.py
