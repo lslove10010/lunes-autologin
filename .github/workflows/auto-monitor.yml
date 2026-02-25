@@ -1,0 +1,38 @@
+# .github/workflows/auto-monitor.yml
+name: Auto Monitor Lunes Server
+
+on:
+  schedule:
+    # 每10天运行一次 (UTC时间 08:00)
+    - cron: '0 8 */10 * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Install Playwright browsers
+      run: |
+        playwright install chromium
+
+    - name: Run monitor script
+      env:
+        LOGIN_EMAIL: ${{ secrets.LOGIN_EMAIL }}
+        LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python scripts/monitor.py
