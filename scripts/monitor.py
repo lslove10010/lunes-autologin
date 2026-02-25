@@ -1,308 +1,160 @@
-# scripts/monitor.py
+# scripts/monitor_drission.py
 import os
-import asyncio
-import re
 import time
-import random
-from playwright.async_api import async_playwright
+import asyncio
 import aiohttp
+from DrissionPage import ChromiumPage, ChromiumOptions
 
-# 从环境变量获取配置
-LOGIN_EMAIL = os.environ['LOGIN_EMAIL']
-LOGIN_PASSWORD = os.environ['LOGIN_PASSWORD']
+# 配置
+EMAIL = os.environ['LOGIN_EMAIL']
+PASSWORD = os.environ['LOGIN_PASSWORD']
 TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
-BASE_URL = "https://betadash.lunes.host"
-LOGIN_URL = f"{BASE_URL}/login?next=/"
-
-async def send_telegram_photo(photo_path: str, caption: str = ""):
-    """发送截图到 Telegram"""
+def send_telegram_photo(photo_path, caption=""):
+    """同步发送截图"""
+    import requests
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    
-    with open(photo_path, 'rb') as photo:
-        data = aiohttp.FormData()
-        data.add_field('chat_id', TELEGRAM_CHAT_ID)
-        data.add_field('caption', caption[:1024])
-        data.add_field('photo', photo, filename=photo_path)
-        data.add_field('parse_mode', 'Markdown')
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data) as response:
-                if response.status == 200:
-                    print(f"✅ 截图已发送: {caption[:50]}...")
-                else:
-                    print(f"❌ 截图发送失败: {await response.text()}")
+    with open(photo_path, 'rb') as f:
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption}
+        requests.post(url, data=data, files={'photo': f})
 
-async def send_telegram(message: str):
-    """发送文本消息到 Telegram"""
+def send_telegram(message):
+    """同步发送消息"""
+    import requests
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message[:4096],
-        "parse_mode": "Markdown"
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as response:
-            if response.status == 200:
-                print("✅ Telegram 消息发送成功")
-            else:
-                print(f"❌ Telegram 发送失败: {await response.text()}")
+    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
 
-async def handle_turnstile(page):
-    """
-    处理 Cloudflare Turnstile 验证
-    参考你的 DrissionPage 代码逻辑：
-    1. 找到 iframe[src*="cloudflare"]
-    2. 点击 body 或 checkbox
-    """
-    print("🔍 检查 Cloudflare 验证...")
-    
+def handle_turnstile(page):
+    """处理 CF 验证 - 完全用你的逻辑"""
     try:
-        # 等待 iframe 出现（最多5秒）
-        iframe = await page.wait_for_selector(
-            'iframe[src*="cloudflare"], iframe[src*="turnstile"], iframe[src*="challenges"]',
-            timeout=5000
-        )
-        
+        iframe = page.ele('css:iframe[src*="cloudflare"]', timeout=5)
         if iframe:
-            print("✅ 发现 CF iframe，开始处理...")
-            
-            # 获取 iframe 的 frame
-            frame = await iframe.content_frame()
-            if not frame:
-                print("❌ 无法进入 iframe")
-                return False
-            
-            # 方法1: 点击 body（参考你的代码）
-            try:
-                body = await frame.wait_for_selector('body', timeout=3000)
-                if body:
-                    print("🖱️ 点击 iframe body...")
-                    await body.click()
-                    await asyncio.sleep(3)
-            except Exception as e:
-                print(f"⚠️ 点击 body 失败: {e}")
-            
-            # 方法2: 点击 checkbox
-            try:
-                checkbox = await frame.wait_for_selector('input[type="checkbox"]', timeout=3000)
-                if checkbox:
-                    print("🖱️ 点击 checkbox...")
-                    await checkbox.click()
-                    await asyncio.sleep(3)
-            except Exception as e:
-                print(f"⚠️ 点击 checkbox 失败: {e}")
-            
-            # 等待验证完成
-            print("⏳ 等待验证完成...")
-            for i in range(20):  # 最多等20秒
-                await asyncio.sleep(1)
+            print("✅ 发现 CF iframe")
+            frame_doc = page.get_frame(iframe)
+            if frame_doc:
+                # 先点击 body
+                frame_doc.ele('tag:body').click()
+                print("🖱️ 点击 iframe body")
+                time.sleep(1)
                 
-                # 检查是否还在验证页面
-                content = await page.content()
-                if 'security verification' not in content.lower() and 'verify you are human' not in content.lower():
-                    print(f"✅ 验证通过！用时 {i+1} 秒")
-                    return True
-                
-                # 每5秒重试点击
-                if (i + 1) % 5 == 0:
-                    try:
-                        body = await frame.wait_for_selector('body', timeout=1000)
-                        if body:
-                            await body.click()
-                            print(f"🖱️ 第{(i+1)//5}次重试点击...")
-                    except:
-                        pass
-            
-            print("⚠️ 验证超时，但继续执行...")
-            return True  # 即使超时也继续，可能已验证
-            
+                # 再点击 checkbox
+                cb = frame_doc.ele('@type=checkbox')
+                if cb:
+                    cb.click()
+                    print("🖱️ 点击 checkbox")
+                    time.sleep(3)
+                return True
     except Exception as e:
-        print(f"ℹ️ 未发现验证或处理失败: {e}")
-        return True  # 没发现验证也算成功
+        print(f"ℹ️ 无验证或失败: {e}")
+    return False
 
-async def monitor_server():
-    """主监控逻辑"""
-    async with async_playwright() as p:
-        # 启动浏览器
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-gpu',
-                '--window-size=1920,1080',
-                '--start-maximized',
-                '--disable-blink-features=AutomationControlled',
-            ]
-        )
-        
-        context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            locale='en-US',
-        )
-        
-        page = await context.new_page()
-        page.set_default_timeout(30000)
-        
-        try:
-            # ========== 步骤 1: 访问登录页 ==========
-            print("🌐 访问登录页...")
-            await page.goto(LOGIN_URL, wait_until='networkidle')
-            await asyncio.sleep(3)
-            
-            await page.screenshot(path='step1_login.png', full_page=True)
-            await send_telegram_photo('step1_login.png', '📸 步骤1: 登录页')
-            
-            # ========== 步骤 2: 处理 CF 验证 ==========
-            await handle_turnstile(page)
-            
-            # ========== 步骤 3: 填写账号 ==========
-            print("🔐 填写账号...")
-            
-            # 等待并填写邮箱
-            await page.wait_for_selector('input[type="email"]', state='visible')
-            await page.fill('input[type="email"]', LOGIN_EMAIL)
-            await asyncio.sleep(0.5)
-            
-            # 填写密码
-            await page.fill('input[type="password"]', LOGIN_PASSWORD)
-            await asyncio.sleep(0.5)
-            
-            await page.screenshot(path='step2_filled.png', full_page=True)
-            await send_telegram_photo('step2_filled.png', '📸 步骤2: 已填账号')
-            
-            # ========== 步骤 4: 点击登录 ==========
-            print("🖱️ 点击登录...")
-            
-            # 再次处理验证（登录前）
-            await handle_turnstile(page)
-            
-            # 点击登录按钮
-            await page.click('button[type="submit"]')
-            await asyncio.sleep(5)
-            
-            await page.screenshot(path='step3_after_login.png', full_page=True)
-            await send_telegram_photo('step3_after_login.png', '📸 步骤3: 点击登录后')
-            
-            # ========== 步骤 5: 处理登录后的验证 ==========
-            await handle_turnstile(page)
-            
-            # ========== 步骤 6: 点击 Continue to dashboard ==========
-            print("🖱️ 点击 Continue...")
-            
-            # 等待按钮出现
-            await page.wait_for_selector('text=Continue to dashboard', timeout=15000)
-            await page.click('button:has-text("Continue to dashboard")')
-            await asyncio.sleep(5)
-            
-            await page.screenshot(path='step4_dashboard.png', full_page=True)
-            await send_telegram_photo('step4_dashboard.png', '📸 步骤4: Dashboard')
-            
-            # ========== 步骤 7: 点击 Open Panel ==========
-            print("🖱️ 点击 Open Panel...")
-            
-            await page.wait_for_selector('text=Open Panel', timeout=15000)
-            await page.click('button:has-text("Open Panel")')
-            await asyncio.sleep(5)
-            
-            # 检查新标签页
-            pages = context.pages
-            if len(pages) > 1:
-                page = pages[-1]
-                print(f"🔗 切换到新页面: {page.url}")
-                await asyncio.sleep(3)
-            
-            await page.screenshot(path='step5_panel.png', full_page=True)
-            await send_telegram_photo('step5_panel.png', '📸 步骤5: 控制面板')
-            
-            # ========== 步骤 8: 抓取数据 ==========
-            print("📊 抓取数据...")
-            
-            # 等待数据加载
-            await page.wait_for_selector('text=Uptime', timeout=15000)
-            await asyncio.sleep(2)
-            
-            data = await extract_server_data(page)
-            
-            await page.screenshot(path='step6_final.png', full_page=True)
-            
-            # 发送报告
-            msg = format_telegram_message(data)
-            await send_telegram(msg)
-            await send_telegram_photo('step6_final.png', '📸 完成')
-            
-            print("✅ 全部完成！")
-            
-        except Exception as e:
-            error_msg = f"❌ 错误: {str(e)}"
-            print(error_msg)
-            try:
-                await page.screenshot(path='error.png', full_page=True)
-                await send_telegram_photo('error.png', f'❌ 错误: {str(e)}')
-            except:
-                pass
-            await send_telegram(error_msg)
-            
-        finally:
-            await browser.close()
-
-async def extract_server_data(page):
-    """提取服务器数据"""
-    data = {
-        'server_name': 'webapphost',
-        'uptime': 'N/A',
-        'cpu_load': 'N/A',
-        'memory': 'N/A',
-        'disk': 'N/A',
-        'address': 'N/A'
-    }
+def monitor():
+    """主函数"""
+    # 初始化浏览器
+    co = ChromiumOptions()
+    if os.getenv('GITHUB_ACTIONS'):
+        co.set_browser_path('/usr/bin/google-chrome')
+    
+    co.set_argument('--no-sandbox')
+    co.set_argument('--disable-gpu')
+    co.set_argument('--window-size=1920,1080')
+    
+    page = ChromiumPage(co)
+    page.set.timeouts(10)
     
     try:
-        text = await page.inner_text('body')
+        print("🌐 访问登录页...")
+        page.get("https://betadash.lunes.host/login?next=/")
+        time.sleep(3)
         
-        patterns = {
-            'uptime': r'(\d+d?\s*\d+h\s+\d+m\s+\d+s|\d+h\s+\d+m\s+\d+s)',
-            'cpu_load': r'([\d.]+%?\s*/\s*[\d.]+%?)',
-            'memory': r'([\d.]+\s*MiB?\s*/\s*[\d.]+\s*MiB?)',
-            'disk': r'Disk\s+([\d.]+\s*MiB?\s*/\s*[\d.]+\s*MiB?)',
-            'address': r'(node\d+\.lunes\.host:\d+)'
-        }
+        # 截图1
+        page.get_screenshot(path="step1.png", full_page=True)
+        send_telegram_photo("step1.png", "📸 步骤1: 登录页")
         
-        for key, pattern in patterns.items():
-            matches = re.findall(pattern, text)
-            if matches:
-                data[key] = matches[0]
-                print(f"✅ 提取到 {key}: {data[key]}")
-                
+        # 处理验证
+        handle_turnstile(page)
+        
+        # 填写账号
+        print("🔐 填写账号...")
+        page.ele('css:input[type="email"]').input(EMAIL)
+        page.ele('css:input[type="password"]').input(PASSWORD)
+        time.sleep(1)
+        
+        page.get_screenshot(path="step2.png", full_page=True)
+        send_telegram_photo("step2.png", "📸 步骤2: 已填账号")
+        
+        # 登录前验证
+        handle_turnstile(page)
+        
+        # 点击登录
+        print("🖱️ 点击登录...")
+        page.ele('css:button[type="submit"]').click()
+        time.sleep(5)
+        
+        page.get_screenshot(path="step3.png", full_page=True)
+        send_telegram_photo("step3.png", "📸 步骤3: 登录后")
+        
+        # 登录后验证
+        handle_turnstile(page)
+        
+        # 点击 Continue
+        print("🖱️ 点击 Continue...")
+        page.ele('text=Continue to dashboard').click()
+        time.sleep(5)
+        
+        page.get_screenshot(path="step4.png", full_page=True)
+        send_telegram_photo("step4.png", "📸 步骤4: Dashboard")
+        
+        # 点击 Open Panel
+        print("🖱️ 点击 Open Panel...")
+        page.ele('text=Open Panel').click()
+        time.sleep(5)
+        
+        # 获取新标签页
+        tabs = page.tabs
+        if len(tabs) > 1:
+            page = tabs[-1]
+            print(f"🔗 切换到新标签: {page.url}")
+            time.sleep(3)
+        
+        page.get_screenshot(path="step5.png", full_page=True)
+        send_telegram_photo("step5.png", "📸 步骤5: 控制面板")
+        
+        # 抓取数据
+        print("📊 抓取数据...")
+        time.sleep(3)
+        
+        # 提取数据（正则或元素查找）
+        uptime = page.ele('text=Uptime >> xpath=following-sibling::div', timeout=5).text if page.ele('text=Uptime', timeout=1) else "N/A"
+        cpu = page.ele('text=CPU Load >> xpath=following-sibling::div', timeout=5).text if page.ele('text=CPU Load', timeout=1) else "N/A"
+        memory = page.ele('text=Memory >> xpath=following-sibling::div', timeout=5).text if page.ele('text=Memory', timeout=1) else "N/A"
+        
+        # 最终截图
+        page.get_screenshot(path="step6.png", full_page=True)
+        
+        # 发送报告
+        msg = f"""🖥️ Lunes Server 监控报告
+
+⏱️ Uptime: {uptime}
+🔄 CPU: {cpu}
+💾 Memory: {memory}
+
+✅ 完成"""
+        
+        send_telegram(msg)
+        send_telegram_photo("step6.png", "📸 完成")
+        
+        print("✅ 全部完成！")
+        
     except Exception as e:
-        print(f"⚠️ 提取警告: {e}")
-    
-    return data
-
-def format_telegram_message(data):
-    """格式化消息"""
-    from datetime import datetime
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    return f"""🖥️ *Lunes Server 监控报告*
-
-📅 `{now}`
-
-📌 *服务器*
-• 名称: `{data.get('server_name', 'N/A')}`
-• 地址: `{data.get('address', 'N/A')}`
-
-📊 *资源*
-⏱️ Uptime: `{data.get('uptime', 'N/A')}`
-🔄 CPU: `{data.get('cpu_load', 'N/A')}`
-💾 Memory: `{data.get('memory', 'N/A')}`
-💿 Disk: `{data.get('disk', 'N/A')}`
-
-✅ 自动检查完成
-"""
+        print(f"❌ 错误: {e}")
+        page.get_screenshot(path="error.png", full_page=True)
+        send_telegram_photo("error.png", f"❌ 错误: {e}")
+        send_telegram(f"❌ 监控失败: {e}")
+        
+    finally:
+        page.quit()
 
 if __name__ == "__main__":
-    asyncio.run(monitor_server())
+    monitor()
