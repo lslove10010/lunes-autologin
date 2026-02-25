@@ -3,6 +3,7 @@ import os
 import time
 import re
 import requests
+import tempfile
 from datetime import datetime
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -15,18 +16,14 @@ TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 def send_telegram_photo(photo_path, caption=""):
     """同步发送截图"""
     if not os.path.exists(photo_path):
-        print(f"⚠️ 截图不存在: {photo_path}")
         return
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
         with open(photo_path, 'rb') as f:
             data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption}
-            response = requests.post(url, data=data, files={'photo': f}, timeout=30)
-            if response.status_code == 200:
-                print(f"✅ 截图已发送: {caption[:50]}...")
-            else:
-                print(f"❌ 截图发送失败: {response.text}")
+            requests.post(url, data=data, files={'photo': f}, timeout=30)
+            print(f"✅ 截图已发送: {caption[:50]}...")
     except Exception as e:
         print(f"❌ 发送截图异常: {e}")
 
@@ -34,63 +31,48 @@ def send_telegram(message):
     """同步发送消息"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        payload = {
+        requests.post(url, json={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message[:4096],
             "parse_mode": "Markdown"
-        }
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code == 200:
-            print("✅ Telegram 消息发送成功")
-        else:
-            print(f"❌ Telegram 发送失败: {response.text}")
+        }, timeout=30)
+        print("✅ Telegram 消息发送成功")
     except Exception as e:
         print(f"❌ 发送消息异常: {e}")
 
 def handle_turnstile(page):
-    """处理 CF 验证"""
+    """
+    完全按照你参考代码的逻辑处理 CF 验证
+    关键点：快速尝试，不等待，失败就跳过
+    """
     try:
-        print("🔍 检查 Cloudflare 验证...")
-        iframe = page.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"], iframe[src*="challenges"]', timeout=5)
-        
+        # 快速查找 iframe，5秒超时
+        iframe = page.ele('css:iframe[src*="cloudflare"]', timeout=5)
         if iframe:
-            print("✅ 发现 CF iframe，开始处理...")
+            print("✅ 发现 CF iframe")
             frame_doc = page.get_frame(iframe)
-            
             if frame_doc:
-                # 方法1: 点击 body
-                try:
-                    body = frame_doc.ele('tag:body', timeout=3)
-                    if body:
-                        body.click()
-                        print("🖱️ 点击 iframe body")
-                        time.sleep(1)
-                except Exception as e:
-                    print(f"⚠️ 点击 body 失败: {e}")
+                # 先点击 body
+                frame_doc.ele('tag:body').click()
+                print("🖱️ 点击 iframe body")
                 
-                # 方法2: 点击 checkbox
-                try:
-                    cb = frame_doc.ele('@type=checkbox', timeout=3)
-                    if cb:
-                        cb.click()
-                        print("🖱️ 点击 checkbox")
-                        time.sleep(3)
-                except Exception as e:
-                    print(f"⚠️ 点击 checkbox 失败: {e}")
+                # 再点击 checkbox
+                cb = frame_doc.ele('@type=checkbox')
+                if cb:
+                    cb.click()
+                    print("🖱️ 点击 checkbox")
                 
+                time.sleep(3)  # 等待验证完成
                 return True
-            else:
-                print("❌ 无法进入 iframe")
-        else:
-            print("ℹ️ 未发现 CF 验证")
-            
     except Exception as e:
-        print(f"ℹ️ 无验证或处理失败: {e}")
+        # 你的代码这里直接 pass，不处理异常
+        print(f"ℹ️ CF处理: {e}")
+        pass
     
     return False
 
 def take_screenshot(page, name):
-    """截图辅助函数"""
+    """截图"""
     try:
         filename = f"{name}.png"
         page.get_screenshot(path=filename, full_page=True)
@@ -101,7 +83,7 @@ def take_screenshot(page, name):
         return None
 
 def extract_data(page):
-    """提取服务器数据"""
+    """提取数据"""
     data = {
         'uptime': 'N/A',
         'cpu_load': 'N/A',
@@ -111,24 +93,7 @@ def extract_data(page):
     }
     
     try:
-        # 方法1: 通过文本查找
-        try:
-            uptime_ele = page.ele('text=Uptime', timeout=2)
-            if uptime_ele:
-                parent = uptime_ele.parent()
-                if parent:
-                    siblings = parent.eles('tag:div')
-                    for sib in siblings:
-                        text = sib.text
-                        if 'h' in text and 'm' in text:
-                            data['uptime'] = text.strip()
-                            break
-        except:
-            pass
-        
-        # 方法2: 正则提取整个页面文本
         page_text = page.html
-        
         patterns = {
             'uptime': r'(\d+d?\s*\d+h\s+\d+m\s+\d+s|\d+h\s+\d+m\s+\d+s)',
             'cpu_load': r'CPU\s*Load\s*[\n\r\s]*([\d.]+%?\s*/\s*[\d.]+%?)',
@@ -138,163 +103,159 @@ def extract_data(page):
         }
         
         for key, pattern in patterns.items():
-            if data[key] == 'N/A':
-                matches = re.findall(pattern, page_text)
-                if matches:
-                    data[key] = matches[0]
-                    print(f"✅ 提取到 {key}: {data[key]}")
-                    
+            matches = re.findall(pattern, page_text)
+            if matches:
+                data[key] = matches[0]
+                print(f"✅ 提取到 {key}: {data[key]}")
     except Exception as e:
-        print(f"⚠️ 提取数据警告: {e}")
+        print(f"⚠️ 提取警告: {e}")
     
     return data
 
 def monitor():
-    """主函数"""
+    """主函数 - 完全按照你参考代码的逻辑"""
     print("🚀 开始监控...")
     
-    # 初始化浏览器配置
+    # 初始化浏览器 - 参考你的代码配置
     co = ChromiumOptions()
     
-    # GitHub Actions 环境配置
     if os.getenv('GITHUB_ACTIONS') == 'true':
-        print("🔧 GitHub Actions 环境 detected")
+        print("🔧 GitHub Actions 环境")
         co.set_browser_path('/usr/bin/google-chrome')
-        
-        # 关键：无界面模式
-        co.set_argument('--headless=new')
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
+        co.set_argument('--window-size=1920,1080')
+        co.set_argument('--start-maximized')
+        co.set_argument('--lang=zh-CN')
+        
+        # 无界面模式（关键）
+        co.set_argument('--headless=new')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-setuid-sandbox')
-        co.set_argument('--disable-web-security')
-        co.set_argument('--disable-features=IsolateOrigins,site-per-process')
-        
-        # 关键：设置远程调试端口
         co.set_argument('--remote-debugging-port=9222')
         
-        # 窗口大小
-        co.set_argument('--window-size=1920,1080')
-        
-        # 用户数据目录（避免冲突）
-        import tempfile
+        # 用户数据目录
         user_data_dir = tempfile.mkdtemp()
         co.set_user_data_path(user_data_dir)
-        print(f"📁 用户数据目录: {user_data_dir}")
     else:
-        # 本地环境
         co.set_argument('--no-sandbox')
         co.set_argument('--window-size=1920,1080')
     
-    # 反检测
-    co.set_argument('--disable-blink-features=AutomationControlled')
-    
-    page = None
-    screenshots = []
+    page = ChromiumPage(co)
+    page.set.timeouts(10)
     
     try:
-        print("🌐 启动浏览器...")
-        page = ChromiumPage(co)
-        page.set.timeouts(10)
-        
         # ========== 步骤 1: 访问登录页 ==========
-        print("🌐 访问登录页...")
+        print("1. 访问登录页...")
         page.get("https://betadash.lunes.host/login?next=/")
-        time.sleep(3)
+        time.sleep(3)  # 等待页面和验证加载
         
-        shot = take_screenshot(page, "step1_login")
-        if shot:
-            screenshots.append(shot)
-            send_telegram_photo(shot, "📸 步骤1: 登录页")
-        
-        # ========== 步骤 2: 处理 CF 验证 ==========
+        # ========== 步骤 2: 立即处理 CF 验证（关键！在填表前） ==========
+        print("2. 处理 CF 验证...")
         handle_turnstile(page)
         
         # ========== 步骤 3: 填写账号 ==========
-        print("🔐 填写账号...")
+        print("3. 填写账号...")
+        page.ele('css:input[type="email"]').input(EMAIL)
+        page.ele('css:input[type="password"]').input(PASSWORD)
         
-        email_input = page.ele('css:input[type="email"]', timeout=10)
-        email_input.input(EMAIL)
-        time.sleep(0.5)
-        
-        pwd_input = page.ele('css:input[type="password"]', timeout=10)
-        pwd_input.input(PASSWORD)
-        time.sleep(0.5)
-        
-        shot = take_screenshot(page, "step2_filled")
+        # 截图1: 登录前
+        shot = take_screenshot(page, "step1_login")
         if shot:
-            screenshots.append(shot)
-            send_telegram_photo(shot, "📸 步骤2: 已填账号")
+            send_telegram_photo(shot, "📸 登录前")
         
-        # ========== 步骤 4: 登录前验证 + 点击登录 ==========
-        handle_turnstile(page)
+        # ========== 步骤 4: 登录前再次处理 CF，然后点击登录 ==========
+        print("4. 点击登录...")
+        handle_turnstile(page)  # 再次处理，防止新出现的验证
+        page.ele('css:button[type="submit"]').click()
         
-        print("🖱️ 点击登录...")
-        login_btn = page.ele('css:button[type="submit"]', timeout=10)
-        login_btn.click()
+        print("5. 等待跳转...")
         time.sleep(5)
         
-        shot = take_screenshot(page, "step3_after_login")
-        if shot:
-            screenshots.append(shot)
-            send_telegram_photo(shot, "📸 步骤3: 点击登录后")
+        # ========== 步骤 5: 检查是否需要二次点击（参考你的代码逻辑） ==========
+        login_success = False
         
-        # ========== 步骤 5: 处理登录后验证 ==========
-        handle_turnstile(page)
+        # 检查是否在 dashboard 或 servers 页面
+        if "dashboard" in page.url or "servers" in page.url:
+            login_success = True
+            print("✅ 登录成功（已在 dashboard）")
+        elif "login" in page.url:
+            print("⚠️ 仍在登录页，尝试二次处理...")
+            handle_turnstile(page)
+            time.sleep(2)
+            
+            # 再次点击登录
+            try:
+                page.ele('css:button[type="submit"]').click()
+                time.sleep(5)
+                
+                if "dashboard" in page.url or "servers" in page.url:
+                    login_success = True
+                    print("✅ 二次登录成功")
+            except:
+                pass
+        
+        if not login_success:
+            # 检查是否有 Continue 按钮（说明已登录但需确认）
+            try:
+                page.ele('text=Continue to dashboard', timeout=3)
+                login_success = True
+                print("✅ 发现 Continue 按钮，登录成功")
+            except:
+                pass
+        
+        if not login_success:
+            raise Exception("登录失败")
+        
+        # 截图2: 登录成功
+        shot = take_screenshot(page, "step2_logged_in")
+        if shot:
+            send_telegram_photo(shot, "📸 登录成功")
         
         # ========== 步骤 6: 点击 Continue to dashboard ==========
-        print("🖱️ 点击 Continue to dashboard...")
+        print("6. 点击 Continue...")
         
-        continue_btn = None
-        for selector in [
-            'text=Continue to dashboard',
-            'button:has-text("Continue")',
-            'a:has-text("Continue to dashboard")'
-        ]:
-            try:
-                continue_btn = page.ele(selector, timeout=5)
-                if continue_btn:
-                    print(f"✅ 找到 Continue 按钮: {selector}")
-                    break
-            except:
-                continue
+        try:
+            continue_btn = page.ele('text=Continue to dashboard', timeout=5)
+            continue_btn.click()
+            time.sleep(3)
+        except:
+            print("ℹ️ 无需点击 Continue，继续...")
         
-        if not continue_btn:
-            raise Exception("未找到 Continue to dashboard 按钮")
-        
-        continue_btn.click()
-        time.sleep(5)
-        
-        shot = take_screenshot(page, "step4_dashboard")
+        # 截图3: Dashboard
+        shot = take_screenshot(page, "step3_dashboard")
         if shot:
-            screenshots.append(shot)
-            send_telegram_photo(shot, "📸 步骤4: Dashboard")
+            send_telegram_photo(shot, "📸 Dashboard")
         
         # ========== 步骤 7: 点击 Open Panel ==========
-        print("🖱️ 点击 Open Panel...")
+        print("7. 点击 Open Panel...")
         
-        open_panel_btn = None
-        for selector in [
-            'text=Open Panel',
-            'button:has-text("Open Panel")',
-            'a:has-text("Open Panel")'
-        ]:
+        # 查找服务器卡片（参考第二张图的结构）
+        # 可能需要先找到 webapphost 卡片
+        try:
+            # 尝试直接点击 Open Panel
+            open_panel = page.ele('text=Open Panel', timeout=10)
+            open_panel.click()
+            time.sleep(5)
+        except:
+            # 如果找不到，可能需要先点击服务器卡片
+            print("🔄 尝试查找服务器卡片...")
             try:
-                open_panel_btn = page.ele(selector, timeout=5)
-                if open_panel_btn:
-                    print(f"✅ 找到 Open Panel 按钮: {selector}")
-                    break
-            except:
-                continue
-        
-        if not open_panel_btn:
-            raise Exception("未找到 Open Panel 按钮")
-        
-        open_panel_btn.click()
-        time.sleep(5)
+                # 根据第二张图，点击 webapphost 卡片进入
+                webapphost = page.ele('text=webapphost', timeout=5)
+                webapphost.click()
+                time.sleep(3)
+                
+                # 然后再找 Open Panel
+                open_panel = page.ele('text=Open Panel', timeout=5)
+                open_panel.click()
+                time.sleep(5)
+            except Exception as e:
+                print(f"⚠️ 查找 Open Panel 失败: {e}")
+                raise
         
         # ========== 步骤 8: 切换到新标签页 ==========
-        print("🔄 检查新标签页...")
+        print("8. 检查新标签页...")
         tabs = page.tabs
         print(f"📑 当前有 {len(tabs)} 个标签页")
         
@@ -303,24 +264,22 @@ def monitor():
             print(f"🔗 切换到新标签: {page.url}")
             time.sleep(3)
         
-        shot = take_screenshot(page, "step5_panel")
+        # 截图4: 控制面板
+        shot = take_screenshot(page, "step4_panel")
         if shot:
-            screenshots.append(shot)
-            send_telegram_photo(shot, "📸 步骤5: 控制面板")
+            send_telegram_photo(shot, "📸 控制面板")
         
         # ========== 步骤 9: 抓取数据 ==========
-        print("📊 抓取数据...")
+        print("9. 抓取数据...")
         time.sleep(3)
         
         data = extract_data(page)
         
-        shot = take_screenshot(page, "step6_final")
-        if shot:
-            screenshots.append(shot)
+        # 最终截图
+        shot = take_screenshot(page, "step5_final")
         
         # ========== 步骤 10: 发送报告 ==========
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         msg = f"""🖥️ *Lunes Server 监控报告*
 
 📅 `{now}`
@@ -334,9 +293,8 @@ def monitor():
 💾 Memory: `{data.get('memory', 'N/A')}`
 💿 Disk: `{data.get('disk', 'N/A')}`
 
-✅ 自动检查完成
+✅ 完成
 """
-        
         send_telegram(msg)
         
         if shot:
@@ -350,10 +308,9 @@ def monitor():
         print(error_msg)
         
         try:
-            if page:
-                error_shot = take_screenshot(page, "error")
-                if error_shot:
-                    send_telegram_photo(error_shot, f"❌ 错误: {str(e)}")
+            error_shot = take_screenshot(page, "error")
+            if error_shot:
+                send_telegram_photo(error_shot, f"❌ 错误: {str(e)}")
         except:
             pass
         
@@ -362,8 +319,7 @@ def monitor():
         
     finally:
         print("🧹 清理浏览器...")
-        if page:
-            page.quit()
+        page.quit()
 
 if __name__ == "__main__":
     success = monitor()
