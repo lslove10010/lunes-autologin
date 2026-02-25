@@ -111,14 +111,12 @@ def extract_data(page):
     }
     
     try:
-        # 方法1: 通过文本查找（DrissionPage 语法）
+        # 方法1: 通过文本查找
         try:
             uptime_ele = page.ele('text=Uptime', timeout=2)
             if uptime_ele:
-                # 找父元素的下一个兄弟或子元素
                 parent = uptime_ele.parent()
                 if parent:
-                    # 尝试找同级 div
                     siblings = parent.eles('tag:div')
                     for sib in siblings:
                         text = sib.text
@@ -129,7 +127,7 @@ def extract_data(page):
             pass
         
         # 方法2: 正则提取整个页面文本
-        page_text = page.html  # 或 page.text
+        page_text = page.html
         
         patterns = {
             'uptime': r'(\d+d?\s*\d+h\s+\d+m\s+\d+s|\d+h\s+\d+m\s+\d+s)',
@@ -155,31 +153,50 @@ def monitor():
     """主函数"""
     print("🚀 开始监控...")
     
-    # 初始化浏览器
+    # 初始化浏览器配置
     co = ChromiumOptions()
     
     # GitHub Actions 环境配置
     if os.getenv('GITHUB_ACTIONS') == 'true':
         print("🔧 GitHub Actions 环境 detected")
         co.set_browser_path('/usr/bin/google-chrome')
+        
+        # 关键：无界面模式
+        co.set_argument('--headless=new')
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-setuid-sandbox')
+        co.set_argument('--disable-web-security')
+        co.set_argument('--disable-features=IsolateOrigins,site-per-process')
+        
+        # 关键：设置远程调试端口
+        co.set_argument('--remote-debugging-port=9222')
+        
+        # 窗口大小
+        co.set_argument('--window-size=1920,1080')
+        
+        # 用户数据目录（避免冲突）
+        import tempfile
+        user_data_dir = tempfile.mkdtemp()
+        co.set_user_data_path(user_data_dir)
+        print(f"📁 用户数据目录: {user_data_dir}")
     else:
         # 本地环境
         co.set_argument('--no-sandbox')
+        co.set_argument('--window-size=1920,1080')
     
-    co.set_argument('--window-size=1920,1080')
-    co.set_argument('--start-maximized')
+    # 反检测
     co.set_argument('--disable-blink-features=AutomationControlled')
     
-    page = ChromiumPage(co)
-    page.set.timeouts(10)
-    
+    page = None
     screenshots = []
     
     try:
+        print("🌐 启动浏览器...")
+        page = ChromiumPage(co)
+        page.set.timeouts(10)
+        
         # ========== 步骤 1: 访问登录页 ==========
         print("🌐 访问登录页...")
         page.get("https://betadash.lunes.host/login?next=/")
@@ -196,7 +213,6 @@ def monitor():
         # ========== 步骤 3: 填写账号 ==========
         print("🔐 填写账号...")
         
-        # 等待并填写
         email_input = page.ele('css:input[type="email"]', timeout=10)
         email_input.input(EMAIL)
         time.sleep(0.5)
@@ -229,7 +245,6 @@ def monitor():
         # ========== 步骤 6: 点击 Continue to dashboard ==========
         print("🖱️ 点击 Continue to dashboard...")
         
-        # 等待按钮（多种选择器）
         continue_btn = None
         for selector in [
             'text=Continue to dashboard',
@@ -284,7 +299,7 @@ def monitor():
         print(f"📑 当前有 {len(tabs)} 个标签页")
         
         if len(tabs) > 1:
-            page = tabs[-1]  # 切换到最新标签页
+            page = tabs[-1]
             print(f"🔗 切换到新标签: {page.url}")
             time.sleep(3)
         
@@ -295,11 +310,10 @@ def monitor():
         
         # ========== 步骤 9: 抓取数据 ==========
         print("📊 抓取数据...")
-        time.sleep(3)  # 等待数据加载
+        time.sleep(3)
         
         data = extract_data(page)
         
-        # 最终截图
         shot = take_screenshot(page, "step6_final")
         if shot:
             screenshots.append(shot)
@@ -336,9 +350,10 @@ def monitor():
         print(error_msg)
         
         try:
-            error_shot = take_screenshot(page, "error")
-            if error_shot:
-                send_telegram_photo(error_shot, f"❌ 错误: {str(e)}")
+            if page:
+                error_shot = take_screenshot(page, "error")
+                if error_shot:
+                    send_telegram_photo(error_shot, f"❌ 错误: {str(e)}")
         except:
             pass
         
@@ -347,7 +362,8 @@ def monitor():
         
     finally:
         print("🧹 清理浏览器...")
-        page.quit()
+        if page:
+            page.quit()
 
 if __name__ == "__main__":
     success = monitor()
