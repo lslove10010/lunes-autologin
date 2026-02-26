@@ -1,55 +1,43 @@
-# .github/workflows/monitor-lunes.yml
-name: Lunes Monitor with 2captcha
+# .github/workflows/auto-login.yml
+name: Auto Login with 2Captcha
 
 on:
   schedule:
-    # 每10天凌晨3点运行
-    - cron: '0 3 */10 * *'
-  
-  workflow_dispatch:
+    # 每天北京时间 9:00 运行 (UTC 1:00)
+    - cron: '0 1 * * *'
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
-  monitor:
+  login:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    
-    env:
-      LOGIN_EMAIL: ${{ secrets.LOGIN_EMAIL }}
-      LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
-      APIKEY_2CAPTCHA: ${{ secrets.APIKEY_2CAPTCHA }}
-      WECHAT_WEBHOOK_KEY: ${{ secrets.WECHAT_WEBHOOK_KEY }}
-      GITHUB_ACTIONS: "true"
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
 
-    - name: Install Chrome
-      run: |
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
+      - name: Install dependencies
+        run: |
+          npm install puppeteer axios
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install DrissionPage requests
+      - name: Run login script
+        env:
+          WEBSITE_URL: ${{ secrets.WEBSITE_URL }}
+          USERNAME: ${{ secrets.USERNAME }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          CAPTCHA_API_KEY: ${{ secrets.CAPTCHA_API_KEY }}
+          WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+        run: node scripts/login.js
 
-    - name: Run monitor
-      run: |
-        python scripts/monitor_lunes_2captcha.py
-
-    - name: Upload screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: screenshots-${{ github.run_id }}
-        path: "*.png"
-        retention-days: 5
+      - name: Upload screenshot on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-failure-screenshot
+          path: login-failure.png
+          retention-days: 7
