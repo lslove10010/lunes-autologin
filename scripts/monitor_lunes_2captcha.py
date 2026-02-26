@@ -16,7 +16,6 @@ PASSWORD = os.environ['LOGIN_PASSWORD']
 API_KEY_2CAPTCHA = os.environ['APIKEY_2CAPTCHA']
 WECHAT_WEBHOOK_KEY = os.environ['WECHAT_WEBHOOK_KEY']
 
-# 常量配置
 WECHAT_WEBHOOK_URL = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WECHAT_WEBHOOK_KEY}"
 LUNES_LOGIN_URL = "https://betadash.lunes.host/login?next=/"
 
@@ -26,7 +25,6 @@ class WeChatBot:
         self.webhook_url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={webhook_key}"
     
     def send_text(self, content, mentioned_list=None):
-        """发送文本消息"""
         data = {
             "msgtype": "text",
             "text": {
@@ -37,7 +35,6 @@ class WeChatBot:
         return self._send(data)
     
     def send_markdown(self, content):
-        """发送Markdown消息"""
         data = {
             "msgtype": "markdown",
             "markdown": {"content": content}
@@ -45,7 +42,6 @@ class WeChatBot:
         return self._send(data)
     
     def send_image(self, image_path):
-        """发送图片"""
         try:
             with open(image_path, 'rb') as f:
                 image_data = f.read()
@@ -66,7 +62,6 @@ class WeChatBot:
             return False
     
     def _send(self, data):
-        """基础发送方法"""
         try:
             response = requests.post(
                 self.webhook_url,
@@ -85,21 +80,19 @@ class WeChatBot:
             print(f"❌ 发送异常: {e}")
             return False
 
-# ==================== 2Captcha HTTP API模块（参考JS代码） ====================
+# ==================== 2Captcha HTTP API模块 ====================
 class TwoCaptchaHTTP:
     def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = "http://2captcha.com"
     
     def solve_turnstile(self, sitekey, pageurl):
-        """
-        使用HTTP API解决Turnstile - 完全参考JS代码逻辑
-        """
+        """使用HTTP API解决Turnstile"""
         print(f"🤖 请求2captcha解决Turnstile...")
         print(f"   Site Key: {sitekey}")
         print(f"   URL: {pageurl}")
         
-        # 步骤1: 提交任务
+        # 提交任务
         submit_url = f"{self.base_url}/in.php"
         payload = {
             'key': self.api_key,
@@ -119,7 +112,7 @@ class TwoCaptchaHTTP:
         task_id = result['request']
         print(f"   任务ID: {task_id}")
         
-        # 步骤2: 轮询结果（参考JS的24次*5秒=120秒）
+        # 轮询结果
         result_url = f"{self.base_url}/res.php"
         token = None
         
@@ -222,7 +215,7 @@ class LunesAutomation:
             return None
     
     def find_turnstile_sitekey(self):
-        """从页面中提取Turnstile sitekey - 参考JS代码逻辑"""
+        """从页面中提取Turnstile sitekey"""
         try:
             # 方法1: 查找.cf-turnstile的data-sitekey
             sitekey = self.page.run_js('''
@@ -234,7 +227,7 @@ class LunesAutomation:
             if sitekey:
                 return sitekey
             
-            # 方法2: 查找包含turnstile的任何元素
+            # 方法2: 从HTML中正则提取
             html = self.page.html
             match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html)
             if match:
@@ -246,48 +239,51 @@ class LunesAutomation:
         return None
     
     def inject_turnstile_token(self, token):
-        """
-        注入Token到页面 - 完全参考JS代码逻辑
-        JS代码:
-        await page.evaluate((token) => {
-            const textarea = document.querySelector('textarea[name="cf-turnstile-response"]');
-            if (textarea) {
-                textarea.value = token;
-            } else {
-                if (window.turnstileCallback) {
-                    window.turnstileCallback({ token });
-                }
-            }
-        }, result);
-        """
+        """注入Token到页面"""
         try:
             print("📝 注入Token到页面...")
             
-            # 使用DrissionPage执行JS
             result = self.page.run_js(f'''
                 (function() {{
+                    // 方法1: 填充textarea
                     const textarea = document.querySelector('textarea[name="cf-turnstile-response"]');
                     if (textarea) {{
                         textarea.value = '{token}';
                         textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
                         return 'textarea filled';
-                    }} else {{
-                        // 尝试回调方式
-                        if (window.turnstileCallback) {{
-                            window.turnstileCallback({{ token: '{token}' }});
-                            return 'callback executed';
-                        }}
-                        
-                        // 备用：查找input
-                        const input = document.querySelector('input[name="cf-turnstile-response"]');
-                        if (input) {{
-                            input.value = '{token}';
-                            return 'input filled';
-                        }}
-                        
-                        return 'element not found';
                     }}
+                    
+                    // 方法2: 填充input
+                    const input = document.querySelector('input[name="cf-turnstile-response"]');
+                    if (input) {{
+                        input.value = '{token}';
+                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        return 'input filled';
+                    }}
+                    
+                    // 方法3: 查找隐藏的表单字段
+                    const hidden = document.querySelector('input[type="hidden"][name*="cf-"], input[type="hidden"][name*="turnstile"]');
+                    if (hidden) {{
+                        hidden.value = '{token}';
+                        return 'hidden field filled: ' + hidden.name;
+                    }}
+                    
+                    // 方法4: 回调方式
+                    if (window.turnstileCallback) {{
+                        window.turnstileCallback({{ token: '{token}' }});
+                        return 'callback executed';
+                    }}
+                    
+                    // 方法5: 查找cf-turnstile元素并设置属性
+                    const cfWidget = document.querySelector('.cf-turnstile');
+                    if (cfWidget) {{
+                        cfWidget.setAttribute('data-response', '{token}');
+                        return 'widget attribute set';
+                    }}
+                    
+                    return 'no element found';
                 }})()
             ''')
             
@@ -298,13 +294,9 @@ class LunesAutomation:
             print(f"❌ Token注入失败: {e}")
             return False
     
-    def handle_cloudflare(self):
-        """处理Cloudflare验证 - 参考JS代码流程"""
+    def solve_and_inject_captcha(self):
+        """解决验证码并注入"""
         print("🛡️ 开始处理Cloudflare验证...")
-        
-        # 等待页面加载
-        time.sleep(3)
-        self.screenshot("01_cf_detected")
         
         # 查找sitekey
         sitekey = self.find_turnstile_sitekey()
@@ -324,113 +316,104 @@ class LunesAutomation:
         print(f"🔑 Site Key: {sitekey}")
         
         # 使用2captcha解决
-        try:
-            token = self.cf_solver.solve_turnstile(
-                sitekey=sitekey,
-                pageurl=self.page.url
-            )
-            
-            if not token:
-                raise Exception("获取token失败")
-            
-            # 注入token
-            self.inject_turnstile_token(token)
-            
-            # 等待验证生效
-            time.sleep(2)
-            
-            print("✅ Cloudflare验证处理完成")
-            self.screenshot("02_cf_solved")
-            return True
-            
-        except Exception as e:
-            print(f"❌ CF处理失败: {e}")
-            self.screenshot("02_cf_failed")
-            raise
+        token = self.cf_solver.solve_turnstile(
+            sitekey=sitekey,
+            pageurl=self.page.url
+        )
+        
+        if not token:
+            raise Exception("获取token失败")
+        
+        # 注入token
+        self.inject_turnstile_token(token)
+        
+        # 等待验证生效
+        time.sleep(2)
+        
+        print("✅ Cloudflare验证处理完成")
+        return True
     
     def login(self):
-        """执行登录流程 - 参考JS代码逻辑"""
+        """
+        正确登录流程：
+        1. 访问登录页
+        2. 填写邮箱和密码
+        3. 解决CF验证
+        4. 点击 Continue to dashboard
+        """
         print("\n🔐 开始登录流程...")
         
-        # 访问登录页
+        # 步骤1: 访问登录页
         print(f"🌐 访问: {LUNES_LOGIN_URL}")
         self.page.get(LUNES_LOGIN_URL)
-        time.sleep(5)  # 等待networkidle2类似效果
+        time.sleep(5)
         
-        # 处理CF验证
-        self.handle_cloudflare()
+        self.screenshot("01_page_loaded")
         
-        # 截图并发送
-        self.screenshot("03_login_page")
-        self.wx_bot.send_image(self.screenshots[-1])
-        
-        # 填写表单 - 参考JS的page.type
+        # 步骤2: 填写表单（先填表，再过验证！）
         print("📝 填写登录信息...")
         try:
-            # 查找并填写邮箱
-            email_input = self.page.ele('css:input[type="email"], #email', timeout=10)
+            # 填写邮箱
+            email_input = self.page.ele('css:input[type="email"]', timeout=10)
             email_input.click()
             time.sleep(0.3)
             email_input.input(EMAIL)
-            print(f"   邮箱已填写: {EMAIL[:3]}***")
+            print(f"   ✅ 邮箱已填写")
             
             # 填写密码
-            password_input = self.page.ele('css:input[type="password"], #password', timeout=10)
+            password_input = self.page.ele('css:input[type="password"]', timeout=10)
             password_input.click()
             time.sleep(0.3)
             password_input.input(PASSWORD)
-            print("   密码已填写")
+            print(f"   ✅ 密码已填写")
             
         except Exception as e:
             raise Exception(f"填写表单失败: {e}")
         
-        # 再次检查CF（有时在输入后会重新触发）
-        try:
-            self.handle_cloudflare()
-        except:
-            pass
+        self.screenshot("02_form_filled")
+        self.wx_bot.send_image(self.screenshots[-1])
         
-        # 点击登录按钮
-        print("🖱️ 点击登录按钮...")
+        # 步骤3: 解决CF验证（在点击按钮前完成！）
+        print("🛡️ 处理CF人机验证...")
+        self.solve_and_inject_captcha()
+        
+        self.screenshot("03_captcha_solved")
+        
+        # 步骤4: 点击 Continue to dashboard（不是登录按钮！）
+        print("🖱️ 点击 Continue to dashboard...")
         try:
-            submit_btn = self.page.ele('css:button[type="submit"]', timeout=10)
-            submit_btn.click()
+            # 根据截图，应该是这个蓝色按钮
+            continue_btn = self.page.ele('text=Continue to dashboard', timeout=10)
+            continue_btn.click()
+            print("   ✅ 已点击 Continue")
         except Exception as e:
-            raise Exception(f"点击登录失败: {e}")
+            # 备用：尝试查找提交按钮
+            try:
+                submit_btn = self.page.ele('css:button[type="submit"]', timeout=5)
+                submit_btn.click()
+                print("   ⚠️ 点击了submit按钮（备用）")
+            except:
+                raise Exception(f"点击Continue失败: {e}")
         
-        # 等待跳转 - 参考JS的waitForNavigation
+        # 等待跳转
         print("⏳ 等待页面跳转...")
         time.sleep(5)
         
-        # 检查登录结果 - 参考JS逻辑
+        # 检查登录结果
         current_url = self.page.url
         title = self.page.title
         print(f"🔗 当前URL: {current_url}")
         print(f"📄 页面标题: {title}")
         
-        # 判断登录成功：URL包含dashboard且标题不包含Login
-        if "dashboard" in current_url and "Login" not in title:
+        # 判断成功：不在login页面
+        if "login" not in current_url.lower():
             print("✅ 登录成功")
             return True
         
-        # 检查是否需要点击Continue
-        if "login" in current_url:
-            try:
-                continue_btn = self.page.ele('text=Continue to dashboard', timeout=5)
-                print("✅ 发现Continue按钮，登录成功")
-                return True
-            except:
-                pass
-        
-        # 检查错误
-        try:
-            error_elem = self.page.ele('css:.alert-danger, .error-message', timeout=3)
-            if error_elem:
-                error_text = error_elem.text
-                raise Exception(f"登录错误: {error_text}")
-        except Exception as e:
-            if "登录错误" in str(e):
-                raise
+        # 检查是否在dashboard
+        if "dashboard" in current_url or "servers" in current_url:
+            print("✅ 登录成功（在dashboard）")
+            return True
         
         raise Exception(f"登录失败。URL: {current_url}, 标题: {title}")
     
@@ -438,19 +421,10 @@ class LunesAutomation:
         """导航到服务器面板"""
         print("\n🖥️ 导航到服务器...")
         
-        # 点击Continue（如果有）
-        try:
-            continue_btn = self.page.ele('text=Continue to dashboard', timeout=5)
-            continue_btn.click()
-            print("✅ 点击Continue")
-            time.sleep(3)
-        except:
-            print("ℹ️ 无需点击Continue")
-        
-        self.screenshot("04_dashboard")
+        self.screenshot("04_after_login")
         self.wx_bot.send_image(self.screenshots[-1])
         
-        # 查找服务器 - 尝试多种选择器
+        # 查找服务器
         print("🔍 查找服务器...")
         selectors = [
             'text=webapphost',
@@ -483,7 +457,11 @@ class LunesAutomation:
                 continue
         
         if not found:
-            raise Exception("未找到服务器入口")
+            # 可能已经在服务器页面，截图看看
+            self.screenshot("04_no_server_found")
+            self.wx_bot.send_image(self.screenshots[-1])
+            print("⚠️ 未找到服务器入口，可能已在目标页面")
+            # 不报错，继续尝试提取数据
         
         # 处理新标签页
         tabs = self.page.tabs
@@ -494,9 +472,9 @@ class LunesAutomation:
             
             # 新标签可能有新的CF验证
             try:
-                self.handle_cloudflare()
-            except:
-                pass
+                self.solve_and_inject_captcha()
+            except Exception as e:
+                print(f"ℹ️ 新标签CF验证处理: {e}")
         
         return self.page
     
@@ -532,6 +510,12 @@ class LunesAutomation:
                 if matches:
                     data[key] = matches[0]
                     print(f"   {key}: {data[key]}")
+            
+            # 备用：从文本中提取
+            if data['cpu_load'] == 'N/A':
+                cpu_match = re.search(r'(\d+\.\d+)\s*/\s*(\d+\.\d+)', text)
+                if cpu_match:
+                    data['cpu_load'] = f"{cpu_match.group(1)}% / {cpu_match.group(2)}%"
             
         except Exception as e:
             print(f"⚠️ 数据提取警告: {e}")
@@ -571,7 +555,7 @@ class LunesAutomation:
 # ==================== 主程序 ====================
 def main():
     print(f"\n{'='*50}")
-    print(f"🚀 Lunes Server Monitor - 2captcha HTTP版")
+    print(f"🚀 Lunes Server Monitor - 2captcha版")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}\n")
     
@@ -591,7 +575,7 @@ def main():
         # 执行自动化
         lunes = LunesAutomation(page, cf_solver, wx_bot)
         
-        # 登录
+        # 登录（正确顺序：填表 -> 过CF -> 点击Continue）
         lunes.login()
         
         # 导航到服务器
