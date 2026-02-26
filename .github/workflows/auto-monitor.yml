@@ -33,10 +33,10 @@ jobs:
           WECHAT_WEBHOOK_KEY: ${{ secrets.WECHAT_WEBHOOK_KEY }}
         run: python scripts/lunes_monitor.py
 
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          path: /tmp/*.png
-          retention-days: 7
+#      - name: Upload screenshots
+#        if: always()
+#        uses: actions/upload-artifact@v4
+#        with:
+#          name: screenshots
+#          path: /tmp/*.png
+#          retention-days: 7
