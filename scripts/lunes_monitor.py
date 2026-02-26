@@ -95,61 +95,81 @@ def take_screenshot(page, filename):
     return screenshot_path
 
 def extract_server_stats(page):
-    """提取服务器详情页的统计信息"""
+    """提取服务器详情页的统计信息 - 加强版"""
     stats = {}
-   
+    
     try:
-        # 等待关键元素出现
-        page.wait_for_selector("text=Uptime", timeout=15000)
-       
-        # 尝试多种方式提取（更鲁棒）
-        stats["address"] = page.locator("text=node22.lunes.host:3098, div:has-text('Address') ~ div").inner_text().strip() or "N/A"
-       
-        # 卡片式提取
-        cards = page.locator("div.grid > div, .stats-card, [class*='bg-'], div[class*='stat']").all()
+        # 等待 Uptime 出现（核心指标）
+        page.wait_for_selector("text=Uptime", state="visible", timeout=20000)
+        print("找到 'Uptime' 元素，页面已加载")
+        
+        # 尝试提取 Address（可能有端口或 IP）
+        try:
+            address_text = page.locator("text=node22.lunes.host, text=Address").inner_text(timeout=5000).strip()
+            if address_text:
+                stats["address"] = address_text
+                print(f"提取到 address: {address_text}")
+        except:
+            pass
+        
+        # 卡片提取 - 放宽选择器
+        cards = page.locator("div.grid > div, div[class*='card'], div[class*='stat'], div[class*='bg-'], section, article").all()
+        print(f"找到 {len(cards)} 个潜在统计卡片")
+        
         for card in cards:
-            text = card.inner_text().strip()
-            if not text:
+            try:
+                text = card.inner_text().strip()
+                if not text:
+                    continue
+                lower_text = text.lower()
+                
+                if "uptime" in lower_text:
+                    # 去掉标题，保留值（支持 "Uptime: 5 days" 或 "Uptime 5d"）
+                    value = text.replace("Uptime", "", 1).replace(":", "", 1).strip()
+                    stats["uptime"] = value or text.split("Uptime")[-1].strip()
+                elif "cpu load" in lower_text or "cpu" in lower_text:
+                    stats["cpu_load"] = text.replace("CPU Load", "", 1).replace(":", "", 1).strip()
+                elif "memory" in lower_text and "network" not in lower_text:
+                    stats["memory"] = text.replace("Memory", "", 1).replace(":", "", 1).strip()
+                elif "disk" in lower_text:
+                    stats["disk"] = text.replace("Disk", "", 1).replace(":", "", 1).strip()
+                elif "inbound" in lower_text or "network (inbound)" in lower_text:
+                    stats["network_in"] = text.replace("Network (Inbound)", "", 1).replace("Inbound", "", 1).strip()
+                elif "outbound" in lower_text or "network (outbound)" in lower_text:
+                    stats["network_out"] = text.replace("Network (Outbound)", "", 1).replace("Outbound", "", 1).strip()
+            except:
                 continue
-            if "Uptime" in text:
-                stats["uptime"] = text.replace("Uptime", "").strip() or text.split("Uptime")[-1].strip()
-            elif "CPU Load" in text:
-                stats["cpu_load"] = text.replace("CPU Load", "").strip()
-            elif "Memory" in text and "Network" not in text:
-                stats["memory"] = text.replace("Memory", "").strip()
-            elif "Disk" in text:
-                stats["disk"] = text.replace("Disk", "").strip()
-            elif "Network (Inbound)" in text or "Inbound" in text:
-                stats["network_in"] = text.replace("Network (Inbound)", "").strip()
-            elif "Network (Outbound)" in text or "Outbound" in text:
-                stats["network_out"] = text.replace("Network (Outbound)", "").strip()
-       
-        # 最后保底：如果还是空，抓整个可见文本找关键词
-        if len(stats) < 3:
-            visible_text = page.inner_text("body")
-            lines = [line.strip() for line in visible_text.splitlines() if line.strip()]
-            for i, line in enumerate(lines):
-                lower = line.lower()
-                if "uptime" in lower and i+1 < len(lines):
-                    stats["uptime"] = lines[i+1]
-                elif "cpu load" in lower and i+1 < len(lines):
-                    stats["cpu_load"] = lines[i+1]
-                elif "memory" in lower and "network" not in lower and i+1 < len(lines):
-                    stats["memory"] = lines[i+1]
-                elif "disk" in lower and i+1 < len(lines):
-                    stats["disk"] = lines[i+1]
-                elif "inbound" in lower or "network in" in lower and i+1 < len(lines):
-                    stats["network_in"] = lines[i+1]
-                elif "outbound" in lower or "network out" in lower and i+1 < len(lines):
-                    stats["network_out"] = lines[i+1]
-       
+        
+        # 最强保底：整个可见文本逐行匹配（旧代码核心，可靠）
+        if len(stats) < 4:  # 如果卡片没抓够，再用 body
+            print("卡片提取不完整，使用 body 文本保底")
+            body_text = page.inner_text("body", timeout=5000)
+            lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+            
+            for i in range(len(lines)):
+                line = lines[i].lower()
+                if "uptime" in line and i+1 < len(lines):
+                    stats["uptime"] = lines[i+1].strip()
+                if "cpu load" in line or "cpu" in line and "load" in line and i+1 < len(lines):
+                    stats["cpu_load"] = lines[i+1].strip()
+                if "memory" in line and "network" not in line and i+1 < len(lines):
+                    stats["memory"] = lines[i+1].strip()
+                if "disk" in line and i+1 < len(lines):
+                    stats["disk"] = lines[i+1].strip()
+                if ("inbound" in line or "network in" in line) and i+1 < len(lines):
+                    stats["network_in"] = lines[i+1].strip()
+                if ("outbound" in line or "network out" in line) and i+1 < len(lines):
+                    stats["network_out"] = lines[i+1].strip()
+        
         if not stats:
-            stats["error"] = "未能提取到任何统计数据"
-       
+            stats["error"] = "未能提取到任何统计数据，请检查页面结构或选择器"
+        else:
+            print(f"提取成功: {stats}")
+    
     except Exception as e:
-        print(f"提取统计失败: {str(e)}")
+        print(f"提取统计信息失败: {str(e)}")
         stats["error"] = str(e)
-   
+    
     return stats
 
 def format_stats_message(stats):
