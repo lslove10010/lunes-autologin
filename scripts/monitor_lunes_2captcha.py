@@ -80,25 +80,35 @@ class WeChatBot:
             print(f"❌ 发送异常: {e}")
             return False
 
-# ==================== 2Captcha HTTP API模块 ====================
+# ==================== 2Captcha HTTP API模块（Cloudflare Challenge版） ====================
 class TwoCaptchaHTTP:
     def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = "http://2captcha.com"
     
-    def solve_turnstile(self, sitekey, pageurl):
-        """使用HTTP API解决Turnstile"""
-        print(f"🤖 请求2captcha解决Turnstile...")
+    def solve_turnstile_challenge(self, sitekey, pageurl, action, data, pagedata, useragent):
+        """
+        解决Cloudflare Challenge页面的Turnstile
+        需要额外参数：action, data(cData), pagedata(chlPageData)
+        """
+        print(f"🤖 请求2captcha解决Turnstile Challenge...")
         print(f"   Site Key: {sitekey}")
         print(f"   URL: {pageurl}")
+        print(f"   Action: {action}")
+        print(f"   Data: {data[:20] if data else 'N/A'}...")
+        print(f"   PageData: {pagedata[:20] if pagedata else 'N/A'}...")
         
-        # 提交任务
+        # 提交任务 - 使用Cloudflare Challenge所需的所有参数
         submit_url = f"{self.base_url}/in.php"
         payload = {
             'key': self.api_key,
             'method': 'turnstile',
             'sitekey': sitekey,
             'pageurl': pageurl,
+            'action': action,
+            'data': data,
+            'pagedata': pagedata,
+            'userAgent': useragent,
             'json': 1
         }
         
@@ -201,6 +211,7 @@ class LunesAutomation:
         self.cf_solver = cf_solver
         self.wx_bot = wx_bot
         self.screenshots = []
+        self.cf_params = None  # 存储拦截到的CF参数
     
     def screenshot(self, name):
         """截图并保存"""
@@ -214,131 +225,197 @@ class LunesAutomation:
             print(f"❌ 截图失败: {e}")
             return None
     
-    def find_turnstile_sitekey(self):
-        """从页面中提取Turnstile sitekey"""
-        try:
-            # 方法1: 查找.cf-turnstile的data-sitekey
-            sitekey = self.page.run_js('''
-                () => {
-                    const el = document.querySelector('.cf-turnstile');
-                    return el ? el.dataset.sitekey : null;
-                }
-            ''')
-            if sitekey:
-                return sitekey
+    def inject_intercept_script(self):
+        """
+        注入JavaScript拦截turnstile.render调用
+        这是解决Cloudflare Challenge的关键！
+        """
+        intercept_script = """
+        (function() {
+            console.log('🔧 注入拦截脚本...');
             
-            # 方法2: 从HTML中正则提取
-            html = self.page.html
-            match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html)
-            if match:
-                return match.group(1)
-                
-        except Exception as e:
-            print(f"⚠️ 提取sitekey失败: {e}")
-        
-        return None
-    
-    def inject_turnstile_token(self, token):
-        """注入Token到页面"""
-        try:
-            print("📝 注入Token到页面...")
-            
-            result = self.page.run_js(f'''
-                (function() {{
-                    // 方法1: 填充textarea
-                    const textarea = document.querySelector('textarea[name="cf-turnstile-response"]');
-                    if (textarea) {{
-                        textarea.value = '{token}';
-                        textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        return 'textarea filled';
-                    }}
+            const i = setInterval(() => {
+                if (window.turnstile) {
+                    console.log('✅ 检测到window.turnstile，开始拦截...');
+                    clearInterval(i);
                     
-                    // 方法2: 填充input
-                    const input = document.querySelector('input[name="cf-turnstile-response"]');
-                    if (input) {{
+                    // 保存原始render方法
+                    const originalRender = window.turnstile.render;
+                    
+                    // 重写render方法
+                    window.turnstile.render = function(a, b) {
+                        console.log('🎯 拦截到turnstile.render调用');
+                        
+                        // 提取参数
+                        const params = {
+                            sitekey: b.sitekey,
+                            pageurl: window.location.href,
+                            data: b.cData || '',
+                            pagedata: b.chlPageData || '',
+                            action: b.action || '',
+                            userAgent: navigator.userAgent
+                        };
+                        
+                        // 保存到全局变量
+                        window.cfParams = params;
+                        window.cfCallback = b.callback;
+                        
+                        console.log('📦 拦截到的参数:', JSON.stringify(params));
+                        
+                        // 调用原始方法（让widget正常渲染）
+                        return originalRender ? originalRender.apply(this, arguments) : null;
+                    };
+                    
+                    console.log('✅ 拦截脚本注入完成');
+                }
+            }, 50);
+        })();
+        """
+        
+        try:
+            self.page.run_js(intercept_script)
+            print("✅ 拦截脚本已注入")
+            time.sleep(2)  # 等待脚本生效
+            return True
+        except Exception as e:
+            print(f"❌ 注入拦截脚本失败: {e}")
+            return False
+    
+    def get_intercepted_params(self):
+        """获取拦截到的CF参数"""
+        try:
+            # 从页面读取拦截到的参数
+            result = self.page.run_js('() => { return window.cfParams || null; }')
+            if result:
+                self.cf_params = result
+                print(f"✅ 获取到拦截参数: {result}")
+                return result
+            return None
+        except Exception as e:
+            print(f"⚠️ 获取拦截参数失败: {e}")
+            return None
+    
+    def execute_cf_callback(self, token):
+        """
+        执行CF回调函数 - 这是通过验证的关键！
+        调用 window.cfCallback(token) 让页面知道验证已完成
+        """
+        try:
+            print("🚀 执行CF回调函数...")
+            
+            # 方法1: 直接调用cfCallback
+            result = self.page.run_js(f"""
+                (function() {{
+                    if (window.cfCallback) {{
+                        window.cfCallback('{token}');
+                        return 'cfCallback executed';
+                    }}
+                    return 'cfCallback not found';
+                }})()
+            """)
+            print(f"   方法1结果: {result}")
+            
+            if 'executed' in result:
+                return True
+            
+            # 方法2: 调用turnstileCallback
+            result = self.page.run_js(f"""
+                (function() {{
+                    if (window.turnstileCallback) {{
+                        window.turnstileCallback('{token}');
+                        return 'turnstileCallback executed';
+                    }}
+                    return 'turnstileCallback not found';
+                }})()
+            """)
+            print(f"   方法2结果: {result}")
+            
+            if 'executed' in result:
+                return True
+            
+            # 方法3: 填充表单字段并触发表单提交
+            result = self.page.run_js(f"""
+                (function() {{
+                    // 查找并填充隐藏的response字段
+                    const inputs = document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+                    inputs.forEach(input => {{
                         input.value = '{token}';
                         input.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        return 'input filled';
-                    }}
+                    }});
                     
-                    // 方法3: 查找隐藏的表单字段
-                    const hidden = document.querySelector('input[type="hidden"][name*="cf-"], input[type="hidden"][name*="turnstile"]');
-                    if (hidden) {{
-                        hidden.value = '{token}';
-                        return 'hidden field filled: ' + hidden.name;
-                    }}
+                    // 触发验证完成事件
+                    window.dispatchEvent(new CustomEvent('turnstileSolved', {{ detail: {{ token: '{token}' }} }}));
                     
-                    // 方法4: 回调方式
-                    if (window.turnstileCallback) {{
-                        window.turnstileCallback({{ token: '{token}' }});
-                        return 'callback executed';
-                    }}
-                    
-                    // 方法5: 查找cf-turnstile元素并设置属性
-                    const cfWidget = document.querySelector('.cf-turnstile');
-                    if (cfWidget) {{
-                        cfWidget.setAttribute('data-response', '{token}');
-                        return 'widget attribute set';
-                    }}
-                    
-                    return 'no element found';
+                    return 'form fields filled: ' + inputs.length;
                 }})()
-            ''')
+            """)
+            print(f"   方法3结果: {result}")
             
-            print(f"✅ Token注入结果: {result}")
             return True
             
         except Exception as e:
-            print(f"❌ Token注入失败: {e}")
+            print(f"❌ 执行回调失败: {e}")
             return False
     
-    def solve_and_inject_captcha(self):
-        """解决验证码并注入"""
-        print("🛡️ 开始处理Cloudflare验证...")
+    def handle_cloudflare_challenge(self):
+        """
+        处理Cloudflare Challenge验证 - 完整流程
+        1. 注入拦截脚本
+        2. 刷新页面让脚本生效
+        3. 获取拦截的参数
+        4. 使用2captcha解决
+        5. 执行回调函数
+        """
+        print("🛡️ 开始处理Cloudflare Challenge...")
         
-        # 查找sitekey
-        sitekey = self.find_turnstile_sitekey()
-        if not sitekey:
-            print("⚠️ 未找到sitekey，检查是否已自动通过...")
-            # 检查是否还有验证框
-            try:
-                iframe = self.page.ele('css:iframe[src*="challenges.cloudflare"]', timeout=3)
-                if not iframe:
-                    print("✅ 无需验证或已自动通过")
-                    return True
-            except:
-                print("✅ 无需验证")
-                return True
-            raise Exception("未找到Turnstile sitekey")
+        # 步骤1: 注入拦截脚本
+        self.inject_intercept_script()
         
-        print(f"🔑 Site Key: {sitekey}")
+        # 步骤2: 刷新页面以触发拦截
+        print("🔄 刷新页面以捕获参数...")
+        self.page.refresh()
+        time.sleep(5)
         
-        # 使用2captcha解决
-        token = self.cf_solver.solve_turnstile(
-            sitekey=sitekey,
-            pageurl=self.page.url
+        self.screenshot("01_cf_detected")
+        
+        # 步骤3: 获取拦截的参数
+        params = None
+        for i in range(10):  # 最多等待10次
+            params = self.get_intercepted_params()
+            if params:
+                break
+            time.sleep(1)
+        
+        if not params:
+            raise Exception("未能拦截到CF参数")
+        
+        # 步骤4: 使用2captcha解决（使用完整参数）
+        token = self.cf_solver.solve_turnstile_challenge(
+            sitekey=params['sitekey'],
+            pageurl=params['pageurl'],
+            action=params['action'],
+            data=params['data'],
+            pagedata=params['pagedata'],
+            useragent=params['userAgent']
         )
         
-        if not token:
-            raise Exception("获取token失败")
-        
-        # 注入token
-        self.inject_turnstile_token(token)
+        # 步骤5: 执行回调函数（关键！）
+        self.execute_cf_callback(token)
         
         # 等待验证生效
-        time.sleep(2)
+        time.sleep(3)
         
-        print("✅ Cloudflare验证处理完成")
+        print("✅ Cloudflare Challenge处理完成")
+        self.screenshot("02_cf_solved")
         return True
     
     def login(self):
         """
         正确登录流程：
         1. 访问登录页
-        2. 填写邮箱和密码
-        3. 解决CF验证
+        2. 处理CF Challenge（拦截参数->解决->回调）
+        3. 填写邮箱和密码
         4. 点击 Continue to dashboard
         """
         print("\n🔐 开始登录流程...")
@@ -346,11 +423,17 @@ class LunesAutomation:
         # 步骤1: 访问登录页
         print(f"🌐 访问: {LUNES_LOGIN_URL}")
         self.page.get(LUNES_LOGIN_URL)
-        time.sleep(5)
+        time.sleep(3)
         
-        self.screenshot("01_page_loaded")
+        # 步骤2: 处理CF Challenge（在填表前完成！）
+        print("🛡️ 处理Cloudflare Challenge...")
+        self.handle_cloudflare_challenge()
         
-        # 步骤2: 填写表单（先填表，再过验证！）
+        # 截图：验证通过后
+        self.screenshot("03_after_cf")
+        self.wx_bot.send_image(self.screenshots[-1])
+        
+        # 步骤3: 填写表单
         print("📝 填写登录信息...")
         try:
             # 填写邮箱
@@ -370,30 +453,22 @@ class LunesAutomation:
         except Exception as e:
             raise Exception(f"填写表单失败: {e}")
         
-        self.screenshot("02_form_filled")
-        self.wx_bot.send_image(self.screenshots[-1])
+        self.screenshot("04_form_filled")
         
-        # 步骤3: 解决CF验证（在点击按钮前完成！）
-        print("🛡️ 处理CF人机验证...")
-        self.solve_and_inject_captcha()
-        
-        self.screenshot("03_captcha_solved")
-        
-        # 步骤4: 点击 Continue to dashboard（不是登录按钮！）
+        # 步骤4: 点击 Continue to dashboard
         print("🖱️ 点击 Continue to dashboard...")
         try:
-            # 根据截图，应该是这个蓝色按钮
             continue_btn = self.page.ele('text=Continue to dashboard', timeout=10)
             continue_btn.click()
             print("   ✅ 已点击 Continue")
         except Exception as e:
-            # 备用：尝试查找提交按钮
+            # 备用：尝试submit按钮
             try:
                 submit_btn = self.page.ele('css:button[type="submit"]', timeout=5)
                 submit_btn.click()
                 print("   ⚠️ 点击了submit按钮（备用）")
             except:
-                raise Exception(f"点击Continue失败: {e}")
+                raise Exception(f"点击按钮失败: {e}")
         
         # 等待跳转
         print("⏳ 等待页面跳转...")
@@ -405,12 +480,11 @@ class LunesAutomation:
         print(f"🔗 当前URL: {current_url}")
         print(f"📄 页面标题: {title}")
         
-        # 判断成功：不在login页面
+        # 判断成功
         if "login" not in current_url.lower():
             print("✅ 登录成功")
             return True
         
-        # 检查是否在dashboard
         if "dashboard" in current_url or "servers" in current_url:
             print("✅ 登录成功（在dashboard）")
             return True
@@ -421,7 +495,7 @@ class LunesAutomation:
         """导航到服务器面板"""
         print("\n🖥️ 导航到服务器...")
         
-        self.screenshot("04_after_login")
+        self.screenshot("05_dashboard")
         self.wx_bot.send_image(self.screenshots[-1])
         
         # 查找服务器
@@ -446,7 +520,6 @@ class LunesAutomation:
                     else:
                         elem.click()
                         time.sleep(2)
-                        # 点击后查找Open Panel
                         panel_btn = self.page.ele('text=Open Panel', timeout=5)
                         panel_btn.click()
                     
@@ -457,11 +530,7 @@ class LunesAutomation:
                 continue
         
         if not found:
-            # 可能已经在服务器页面，截图看看
-            self.screenshot("04_no_server_found")
-            self.wx_bot.send_image(self.screenshots[-1])
             print("⚠️ 未找到服务器入口，可能已在目标页面")
-            # 不报错，继续尝试提取数据
         
         # 处理新标签页
         tabs = self.page.tabs
@@ -469,12 +538,6 @@ class LunesAutomation:
             self.page = tabs[-1]
             print(f"🔗 切换到新标签: {self.page.url}")
             time.sleep(3)
-            
-            # 新标签可能有新的CF验证
-            try:
-                self.solve_and_inject_captcha()
-            except Exception as e:
-                print(f"ℹ️ 新标签CF验证处理: {e}")
         
         return self.page
     
@@ -496,7 +559,6 @@ class LunesAutomation:
             html = self.page.html
             text = self.page.text
             
-            # 正则提取
             patterns = {
                 'uptime': r'Uptime[:\s]+(\d+d?\s+\d+h\s+\d+m\s+\d+s|\d+h\s+\d+m\s+\d+s)',
                 'cpu_load': r'CPU\s*Load[:\s]+([\d.]+%?\s*/\s*[\d.]+%?)',
@@ -510,12 +572,6 @@ class LunesAutomation:
                 if matches:
                     data[key] = matches[0]
                     print(f"   {key}: {data[key]}")
-            
-            # 备用：从文本中提取
-            if data['cpu_load'] == 'N/A':
-                cpu_match = re.search(r'(\d+\.\d+)\s*/\s*(\d+\.\d+)', text)
-                if cpu_match:
-                    data['cpu_load'] = f"{cpu_match.group(1)}% / {cpu_match.group(2)}%"
             
         except Exception as e:
             print(f"⚠️ 数据提取警告: {e}")
@@ -545,8 +601,7 @@ class LunesAutomation:
         
         self.wx_bot.send_markdown(report)
         
-        # 最终截图
-        final_shot = self.screenshot("05_final")
+        final_shot = self.screenshot("06_final")
         if final_shot:
             self.wx_bot.send_image(final_shot)
         
@@ -555,7 +610,7 @@ class LunesAutomation:
 # ==================== 主程序 ====================
 def main():
     print(f"\n{'='*50}")
-    print(f"🚀 Lunes Server Monitor - 2captcha版")
+    print(f"🚀 Lunes Server Monitor - Cloudflare Challenge版")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}\n")
     
@@ -575,7 +630,7 @@ def main():
         # 执行自动化
         lunes = LunesAutomation(page, cf_solver, wx_bot)
         
-        # 登录（正确顺序：填表 -> 过CF -> 点击Continue）
+        # 登录（先过CF Challenge，再填表）
         lunes.login()
         
         # 导航到服务器
