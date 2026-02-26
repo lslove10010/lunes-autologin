@@ -20,7 +20,6 @@ WECHAT_WEBHOOK_KEY = os.environ['WECHAT_WEBHOOK_KEY']
 # 常量配置
 WECHAT_WEBHOOK_URL = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WECHAT_WEBHOOK_KEY}"
 LUNES_LOGIN_URL = "https://betadash.lunes.host/login?next=/"
-SITE_KEY_TURNSTILE = "0x4AAAAAAABCOgW1RzRr5X5i"  # 需要根据实际情况更新
 
 # ==================== 企业微信推送模块 ====================
 class WeChatBot:
@@ -107,55 +106,51 @@ class WeChatBot:
             print(f"❌ 发送异常: {e}")
             return False
 
-# ==================== 2Captcha CF解决模块 ====================
+# ==================== 2Captcha CF解决模块（修复版） ====================
 class CloudflareSolver:
     def __init__(self, api_key):
         self.solver = TwoCaptcha(api_key)
-        self.max_wait_time = 120  # 最大等待时间（秒）
+        self.max_retries = 3
     
     def solve_turnstile(self, site_key, page_url, invisible=False):
         """
-        解决Turnstile验证
-        :param site_key: Turnstile site key
-        :param page_url: 页面URL
-        :param invisible: 是否隐形验证
-        :return: 验证码token
+        解决Turnstile验证 - 修复版
+        正确调用方式：直接传递参数，不是字典
         """
-        try:
-            print(f"🤖 请求2captcha解决Turnstile...")
-            print(f"   Site Key: {site_key}")
-            print(f"   URL: {page_url}")
-            
-            # 提交任务
-            result = self.solver.turnstile(
-                sitekey=site_key,
-                url=page_url,
-                invisible='true' if invisible else 'false'
-            )
-            
-            if result and 'code' in result:
-                token = result['code']
-                print(f"✅ 2captcha解决成功，获取token")
-                return token
-            else:
-                raise Exception(f"2captcha返回无效结果: {result}")
+        for attempt in range(self.max_retries):
+            try:
+                print(f"🤖 请求2captcha解决Turnstile... (尝试 {attempt + 1}/{self.max_retries})")
+                print(f"   Site Key: {site_key}")
+                print(f"   URL: {page_url}")
                 
-        except Exception as e:
-            print(f"❌ 2captcha解决失败: {e}")
-            raise
-    
-    def solve_challenge(self, site_key, page_url, **kwargs):
-        """通用挑战解决"""
-        try:
-            result = self.solver.solve(
-                sitekey=site_key,
-                url=page_url,
-                **kwargs
-            )
-            return result.get('code')
-        except Exception as e:
-            print(f"❌ Challenge解决失败: {e}")
-            raise
+                # 正确调用方式 - 直接传递参数
+                result = self.solver.turnstile(
+                    sitekey=site_key,
+                    url=page_url
+                )
+                
+                # result是字典，包含code字段
+                if result and 'code' in result:
+                    token = result['code']
+                    print(f"✅ 2captcha解决成功")
+                    print(f"   Token: {token[:60]}...")
+                    return token
+                else:
+                    print(f"⚠️ 2captcha返回格式异常: {result}")
+                    if attempt < self.max_retries - 1:
+                        time.sleep(5)
+                        continue
+                    raise Exception(f"2captcha返回无效结果: {result}")
+                    
+            except Exception as e:
+                print(f"❌ 2captcha尝试 {attempt + 1} 失败: {e}")
+                if attempt < self.max_retries - 1:
+                    print("   等待5秒后重试...")
+                    time.sleep(5)
+                else:
+                    raise Exception(f"2captcha全部尝试失败: {e}")
+        
+        return None
 
 # ==================== 浏览器管理模块 ====================
 class BrowserManager:
@@ -240,7 +235,6 @@ class LunesAutomation:
             html = self.page.html
             
             # 方法1: 查找data-sitekey属性
-            import re
             sitekey_match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html)
             if sitekey_match:
                 return sitekey_match.group(1)
@@ -283,7 +277,7 @@ class LunesAutomation:
                 // 触发自定义事件（某些站点使用）
                 window.dispatchEvent(new CustomEvent('turnstileSolved', {{ detail: {{ token: '{token}' }} }}));
                 
-                return 'Token injected';
+                return 'Token injected: ' + document.querySelectorAll('input[name="cf-turnstile-response"]').length;
             }})();
             """
             result = self.page.run_js(script)
@@ -300,10 +294,13 @@ class LunesAutomation:
             # 检查是否还有验证框
             iframe = self.page.ele('css:iframe[src*="challenges.cloudflare"]', timeout=3)
             if iframe:
-                # 检查iframe是否可见
-                style = iframe.attr('style')
-                if style and 'display: none' in style:
-                    return True
+                # 检查iframe是否可见或已消失
+                try:
+                    style = iframe.attr('style')
+                    if style and ('display: none' in style or 'visibility: hidden' in style):
+                        return True
+                except:
+                    pass
                 return False
             
             # 检查是否有成功标记
@@ -329,12 +326,12 @@ class LunesAutomation:
         # 步骤3: 查找site key
         site_key = self.find_turnstile_sitekey()
         if not site_key:
-            print("⚠️ 未找到site key，尝试默认配置或无需验证")
+            print("⚠️ 未找到site key，尝试直接检查是否已通过")
             # 尝试直接检查是否已通过
             if self.verify_turnstile_solved():
                 print("✅ 无需验证或已自动通过")
                 return True
-            site_key = SITE_KEY_TURNSTILE  # 使用默认key
+            raise Exception("未找到Turnstile site key")
         
         print(f"🔑 Site Key: {site_key}")
         
@@ -348,8 +345,6 @@ class LunesAutomation:
             
             if not token:
                 raise Exception("获取token失败")
-            
-            print(f"🔓 获取到Token: {token[:50]}...")
             
             # 步骤5: 注入token
             self.inject_turnstile_token(token)
