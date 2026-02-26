@@ -1,326 +1,694 @@
-# scripts/monitor_drission.py
+# scripts/monitor_lunes_2captcha.py
 import os
 import time
 import re
-import requests
+import json
+import base64
+import hashlib
 import tempfile
+import requests
 from datetime import datetime
 from DrissionPage import ChromiumPage, ChromiumOptions
+from twocaptcha import TwoCaptcha
 
-# 配置
+# ==================== 配置区域 ====================
 EMAIL = os.environ['LOGIN_EMAIL']
 PASSWORD = os.environ['LOGIN_PASSWORD']
-TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
-TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
+API_KEY_2CAPTCHA = os.environ['APIKEY_2CAPTCHA']  # 2captcha API密钥
+WECHAT_WEBHOOK_KEY = os.environ['WECHAT_WEBHOOK_KEY']
 
-def send_telegram_photo(photo_path, caption=""):
-    """同步发送截图"""
-    if not os.path.exists(photo_path):
-        return
+# 常量配置
+WECHAT_WEBHOOK_URL = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WECHAT_WEBHOOK_KEY}"
+LUNES_LOGIN_URL = "https://betadash.lunes.host/login?next=/"
+SITE_KEY_TURNSTILE = "0x4AAAAAAABCOgW1RzRr5X5i"  # 需要根据实际情况更新
+
+# ==================== 企业微信推送模块 ====================
+class WeChatBot:
+    def __init__(self, webhook_key):
+        self.webhook_url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={webhook_key}"
     
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    try:
-        with open(photo_path, 'rb') as f:
-            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption}
-            requests.post(url, data=data, files={'photo': f}, timeout=30)
-            print(f"✅ 截图已发送: {caption[:50]}...")
-    except Exception as e:
-        print(f"❌ 发送截图异常: {e}")
-
-def send_telegram(message):
-    """同步发送消息"""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message[:4096],
-            "parse_mode": "Markdown"
-        }, timeout=30)
-        print("✅ Telegram 消息发送成功")
-    except Exception as e:
-        print(f"❌ 发送消息异常: {e}")
-
-def handle_turnstile(page):
-    """
-    完全按照你参考代码的逻辑处理 CF 验证
-    关键点：快速尝试，不等待，失败就跳过
-    """
-    try:
-        # 快速查找 iframe，5秒超时
-        iframe = page.ele('css:iframe[src*="cloudflare"]', timeout=5)
-        if iframe:
-            print("✅ 发现 CF iframe")
-            frame_doc = page.get_frame(iframe)
-            if frame_doc:
-                # 先点击 body
-                frame_doc.ele('tag:body').click()
-                print("🖱️ 点击 iframe body")
-                
-                # 再点击 checkbox
-                cb = frame_doc.ele('@type=checkbox')
-                if cb:
-                    cb.click()
-                    print("🖱️ 点击 checkbox")
-                
-                time.sleep(3)  # 等待验证完成
-                return True
-    except Exception as e:
-        # 你的代码这里直接 pass，不处理异常
-        print(f"ℹ️ CF处理: {e}")
-        pass
-    
-    return False
-
-def take_screenshot(page, name):
-    """截图"""
-    try:
-        filename = f"{name}.png"
-        page.get_screenshot(path=filename, full_page=True)
-        print(f"📸 已截图: {filename}")
-        return filename
-    except Exception as e:
-        print(f"❌ 截图失败: {e}")
-        return None
-
-def extract_data(page):
-    """提取数据"""
-    data = {
-        'uptime': 'N/A',
-        'cpu_load': 'N/A',
-        'memory': 'N/A',
-        'disk': 'N/A',
-        'address': 'N/A'
-    }
-    
-    try:
-        page_text = page.html
-        patterns = {
-            'uptime': r'(\d+d?\s*\d+h\s+\d+m\s+\d+s|\d+h\s+\d+m\s+\d+s)',
-            'cpu_load': r'CPU\s*Load\s*[\n\r\s]*([\d.]+%?\s*/\s*[\d.]+%?)',
-            'memory': r'Memory\s*[\n\r\s]*([\d.]+\s*MiB?\s*/\s*[\d.]+\s*MiB?)',
-            'disk': r'Disk\s*[\n\r\s]*([\d.]+\s*MiB?\s*/\s*[\d.]+\s*MiB?)',
-            'address': r'(node\d+\.lunes\.host:\d+)'
+    def send_text(self, content, mentioned_list=None):
+        """发送文本消息"""
+        data = {
+            "msgtype": "text",
+            "text": {
+                "content": content,
+                "mentioned_list": mentioned_list or []
+            }
         }
-        
-        for key, pattern in patterns.items():
-            matches = re.findall(pattern, page_text)
-            if matches:
-                data[key] = matches[0]
-                print(f"✅ 提取到 {key}: {data[key]}")
-    except Exception as e:
-        print(f"⚠️ 提取警告: {e}")
+        return self._send(data)
     
-    return data
+    def send_markdown(self, content):
+        """发送Markdown消息"""
+        data = {
+            "msgtype": "markdown",
+            "markdown": {"content": content}
+        }
+        return self._send(data)
+    
+    def send_image(self, image_path):
+        """发送图片"""
+        try:
+            with open(image_path, 'rb') as f:
+                image_data = f.read()
+            
+            base64_data = base64.b64encode(image_data).decode('utf-8')
+            md5 = hashlib.md5(image_data).hexdigest()
+            
+            data = {
+                "msgtype": "image",
+                "image": {
+                    "base64": base64_data,
+                    "md5": md5
+                }
+            }
+            return self._send(data)
+        except Exception as e:
+            print(f"❌ 图片发送失败: {e}")
+            return False
+    
+    def send_file(self, file_path):
+        """发送文件"""
+        try:
+            upload_url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key={WECHAT_WEBHOOK_KEY}&type=file"
+            with open(file_path, 'rb') as f:
+                files = {'media': (os.path.basename(file_path), f, 'application/octet-stream')}
+                response = requests.post(upload_url, files=files, timeout=30)
+                result = response.json()
+                
+                if result.get('errcode') == 0:
+                    data = {
+                        "msgtype": "file",
+                        "file": {"media_id": result['media_id']}
+                    }
+                    return self._send(data)
+            return False
+        except Exception as e:
+            print(f"❌ 文件发送失败: {e}")
+            return False
+    
+    def _send(self, data):
+        """基础发送方法"""
+        try:
+            response = requests.post(
+                self.webhook_url,
+                json=data,
+                timeout=30,
+                headers={'Content-Type': 'application/json'}
+            )
+            result = response.json()
+            if result.get('errcode') == 0:
+                print(f"✅ 企业微信发送成功: {data.get('msgtype', 'unknown')}")
+                return True
+            else:
+                print(f"❌ 企业微信错误: {result}")
+                return False
+        except Exception as e:
+            print(f"❌ 发送异常: {e}")
+            return False
 
-def monitor():
-    """主函数 - 完全按照你参考代码的逻辑"""
-    print("🚀 开始监控...")
+# ==================== 2Captcha CF解决模块 ====================
+class CloudflareSolver:
+    def __init__(self, api_key):
+        self.solver = TwoCaptcha(api_key)
+        self.max_wait_time = 120  # 最大等待时间（秒）
     
-    # 初始化浏览器 - 参考你的代码配置
-    co = ChromiumOptions()
+    def solve_turnstile(self, site_key, page_url, invisible=False):
+        """
+        解决Turnstile验证
+        :param site_key: Turnstile site key
+        :param page_url: 页面URL
+        :param invisible: 是否隐形验证
+        :return: 验证码token
+        """
+        try:
+            print(f"🤖 请求2captcha解决Turnstile...")
+            print(f"   Site Key: {site_key}")
+            print(f"   URL: {page_url}")
+            
+            # 提交任务
+            result = self.solver.turnstile(
+                sitekey=site_key,
+                url=page_url,
+                invisible='true' if invisible else 'false'
+            )
+            
+            if result and 'code' in result:
+                token = result['code']
+                print(f"✅ 2captcha解决成功，获取token")
+                return token
+            else:
+                raise Exception(f"2captcha返回无效结果: {result}")
+                
+        except Exception as e:
+            print(f"❌ 2captcha解决失败: {e}")
+            raise
     
-    if os.getenv('GITHUB_ACTIONS') == 'true':
-        print("🔧 GitHub Actions 环境")
-        co.set_browser_path('/usr/bin/google-chrome')
-        co.set_argument('--no-sandbox')
-        co.set_argument('--disable-gpu')
-        co.set_argument('--window-size=1920,1080')
-        co.set_argument('--start-maximized')
-        co.set_argument('--lang=zh-CN')
-        
-        # 无界面模式（关键）
-        co.set_argument('--headless=new')
-        co.set_argument('--disable-dev-shm-usage')
-        co.set_argument('--disable-setuid-sandbox')
-        co.set_argument('--remote-debugging-port=9222')
-        
-        # 用户数据目录
-        user_data_dir = tempfile.mkdtemp()
-        co.set_user_data_path(user_data_dir)
-    else:
-        co.set_argument('--no-sandbox')
-        co.set_argument('--window-size=1920,1080')
+    def solve_challenge(self, site_key, page_url, **kwargs):
+        """通用挑战解决"""
+        try:
+            result = self.solver.solve(
+                sitekey=site_key,
+                url=page_url,
+                **kwargs
+            )
+            return result.get('code')
+        except Exception as e:
+            print(f"❌ Challenge解决失败: {e}")
+            raise
+
+# ==================== 浏览器管理模块 ====================
+class BrowserManager:
+    def __init__(self, headless=True):
+        self.headless = headless
+        self.page = None
+        self.user_data_dir = None
     
-    page = ChromiumPage(co)
-    page.set.timeouts(10)
+    def setup(self):
+        """配置并启动浏览器"""
+        co = ChromiumOptions()
+        
+        # 检测环境
+        is_github_actions = os.getenv('GITHUB_ACTIONS') == 'true'
+        
+        if is_github_actions or self.headless:
+            print("🔧 配置无头浏览器...")
+            co.set_browser_path('/usr/bin/google-chrome')
+            co.set_argument('--no-sandbox')
+            co.set_argument('--disable-setuid-sandbox')
+            co.set_argument('--disable-dev-shm-usage')
+            co.set_argument('--disable-gpu')
+            co.set_argument('--headless=new')
+            co.set_argument('--window-size=1920,1080')
+            
+            # 反检测关键配置
+            co.set_argument('--disable-blink-features=AutomationControlled')
+            co.set_argument('--disable-web-security')
+            co.set_argument('--disable-features=IsolateOrigins,site-per-process')
+            co.set_argument('--lang=zh-CN,zh,en')
+            
+            # 用户代理
+            co.set_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            
+            # 远程调试
+            co.set_argument('--remote-debugging-port=9222')
+            
+            # 临时用户目录
+            self.user_data_dir = tempfile.mkdtemp()
+            co.set_user_data_path(self.user_data_dir)
+        else:
+            co.set_argument('--window-size=1920,1080')
+            co.set_argument('--disable-blink-features=AutomationControlled')
+        
+        self.page = ChromiumPage(co)
+        self.page.set.timeouts(15)
+        return self
     
-    try:
-        # ========== 步骤 1: 访问登录页 ==========
-        print("1. 访问登录页...")
-        page.get("https://betadash.lunes.host/login?next=/")
-        time.sleep(3)  # 等待页面和验证加载
+    def get_page(self):
+        return self.page
+    
+    def close(self):
+        if self.page:
+            try:
+                self.page.quit()
+            except:
+                pass
+
+# ==================== Lunes自动化模块 ====================
+class LunesAutomation:
+    def __init__(self, page, cf_solver, wx_bot):
+        self.page = page
+        self.cf_solver = cf_solver
+        self.wx_bot = wx_bot
+        self.screenshots = []
+    
+    def screenshot(self, name):
+        """截图并保存"""
+        try:
+            filename = f"{name}_{datetime.now().strftime('%H%M%S')}.png"
+            self.page.get_screenshot(path=filename, full_page=True)
+            self.screenshots.append(filename)
+            print(f"📸 截图: {filename}")
+            return filename
+        except Exception as e:
+            print(f"❌ 截图失败: {e}")
+            return None
+    
+    def find_turnstile_sitekey(self):
+        """从页面中提取Turnstile site key"""
+        try:
+            html = self.page.html
+            
+            # 方法1: 查找data-sitekey属性
+            import re
+            sitekey_match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html)
+            if sitekey_match:
+                return sitekey_match.group(1)
+            
+            # 方法2: 查找turnstile配置
+            turnstile_match = re.search(r'turnstile.*?sitekey["\']?\s*:\s*["\']([^"\']+)["\']', html, re.DOTALL)
+            if turnstile_match:
+                return turnstile_match.group(1)
+            
+            # 方法3: 查找iframe src
+            iframe_match = re.search(r'challenges\.cloudflare\.com/turnstile.*?sitekey=([^&]+)', html)
+            if iframe_match:
+                return iframe_match.group(1)
+                
+        except Exception as e:
+            print(f"⚠️ 提取sitekey失败: {e}")
         
-        # ========== 步骤 2: 立即处理 CF 验证（关键！在填表前） ==========
-        print("2. 处理 CF 验证...")
-        handle_turnstile(page)
+        return None
+    
+    def inject_turnstile_token(self, token):
+        """将token注入到页面"""
+        try:
+            # 方法1: 填充隐藏的response字段
+            script = f"""
+            (function() {{
+                // 查找并填充turnstile response字段
+                var inputs = document.querySelectorAll('input[name="cf-turnstile-response"], input[name="cf_response"], .cf-turnstile-response');
+                inputs.forEach(function(input) {{
+                    input.value = '{token}';
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }});
+                
+                // 查找turnstile widget并设置data-response
+                var widgets = document.querySelectorAll('.cf-turnstile, .turnstile');
+                widgets.forEach(function(widget) {{
+                    widget.setAttribute('data-response', '{token}');
+                }});
+                
+                // 触发自定义事件（某些站点使用）
+                window.dispatchEvent(new CustomEvent('turnstileSolved', {{ detail: {{ token: '{token}' }} }}));
+                
+                return 'Token injected';
+            }})();
+            """
+            result = self.page.run_js(script)
+            print(f"✅ Token已注入页面: {result}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Token注入失败: {e}")
+            return False
+    
+    def verify_turnstile_solved(self):
+        """验证Turnstile是否已通过"""
+        try:
+            # 检查是否还有验证框
+            iframe = self.page.ele('css:iframe[src*="challenges.cloudflare"]', timeout=3)
+            if iframe:
+                # 检查iframe是否可见
+                style = iframe.attr('style')
+                if style and 'display: none' in style:
+                    return True
+                return False
+            
+            # 检查是否有成功标记
+            success_mark = self.page.ele('css:.cf-turnstile[data-response]', timeout=2)
+            if success_mark:
+                return True
+                
+            return True  # 默认认为已通过
+            
+        except:
+            return True
+    
+    def handle_cloudflare(self):
+        """处理Cloudflare验证"""
+        print("🛡️ 开始处理Cloudflare验证...")
         
-        # ========== 步骤 3: 填写账号 ==========
-        print("3. 填写账号...")
-        page.ele('css:input[type="email"]').input(EMAIL)
-        page.ele('css:input[type="password"]').input(PASSWORD)
+        # 步骤1: 等待页面加载
+        time.sleep(3)
         
-        # 截图1: 登录前
-        shot = take_screenshot(page, "step1_login")
-        if shot:
-            send_telegram_photo(shot, "📸 登录前")
+        # 步骤2: 截图查看当前状态
+        self.screenshot("01_cf_detected")
         
-        # ========== 步骤 4: 登录前再次处理 CF，然后点击登录 ==========
-        print("4. 点击登录...")
-        handle_turnstile(page)  # 再次处理，防止新出现的验证
-        page.ele('css:button[type="submit"]').click()
+        # 步骤3: 查找site key
+        site_key = self.find_turnstile_sitekey()
+        if not site_key:
+            print("⚠️ 未找到site key，尝试默认配置或无需验证")
+            # 尝试直接检查是否已通过
+            if self.verify_turnstile_solved():
+                print("✅ 无需验证或已自动通过")
+                return True
+            site_key = SITE_KEY_TURNSTILE  # 使用默认key
         
-        print("5. 等待跳转...")
+        print(f"🔑 Site Key: {site_key}")
+        
+        # 步骤4: 使用2captcha解决
+        try:
+            token = self.cf_solver.solve_turnstile(
+                site_key=site_key,
+                page_url=self.page.url,
+                invisible=False
+            )
+            
+            if not token:
+                raise Exception("获取token失败")
+            
+            print(f"🔓 获取到Token: {token[:50]}...")
+            
+            # 步骤5: 注入token
+            self.inject_turnstile_token(token)
+            
+            # 步骤6: 等待验证生效
+            time.sleep(3)
+            
+            # 步骤7: 验证结果
+            if self.verify_turnstile_solved():
+                print("✅ Cloudflare验证通过")
+                self.screenshot("02_cf_solved")
+                return True
+            else:
+                raise Exception("验证未通过，可能token无效")
+                
+        except Exception as e:
+            print(f"❌ CF处理失败: {e}")
+            self.screenshot("02_cf_failed")
+            raise
+    
+    def login(self):
+        """执行登录流程"""
+        print("\n🔐 开始登录流程...")
+        
+        # 访问登录页
+        print(f"🌐 访问: {LUNES_LOGIN_URL}")
+        self.page.get(LUNES_LOGIN_URL)
         time.sleep(5)
         
-        # ========== 步骤 5: 检查是否需要二次点击（参考你的代码逻辑） ==========
-        login_success = False
+        # 处理CF验证
+        self.handle_cloudflare()
         
-        # 检查是否在 dashboard 或 servers 页面
-        if "dashboard" in page.url or "servers" in page.url:
-            login_success = True
-            print("✅ 登录成功（已在 dashboard）")
-        elif "login" in page.url:
-            print("⚠️ 仍在登录页，尝试二次处理...")
-            handle_turnstile(page)
-            time.sleep(2)
+        # 截图：登录页状态
+        self.screenshot("03_login_page")
+        self.wx_bot.send_image(self.screenshots[-1])
+        
+        # 填写表单
+        print("📝 填写登录信息...")
+        try:
+            # 等待并填写邮箱
+            email_input = self.page.ele('css:input[type="email"]', timeout=10)
+            email_input.click()
+            time.sleep(0.5)
+            email_input.input(EMAIL)
+            print(f"   邮箱: {EMAIL[:3]}***")
+            
+            # 填写密码
+            password_input = self.page.ele('css:input[type="password"]', timeout=10)
+            password_input.click()
+            time.sleep(0.5)
+            password_input.input(PASSWORD)
+            print("   密码: ***")
+            
+        except Exception as e:
+            raise Exception(f"填写表单失败: {e}")
+        
+        # 再次检查CF（有时在输入后会重新触发）
+        try:
+            self.handle_cloudflare()
+        except:
+            pass  # 忽略二次验证错误
+        
+        # 点击登录
+        print("🖱️ 点击登录按钮...")
+        try:
+            submit_btn = self.page.ele('css:button[type="submit"]', timeout=10)
+            submit_btn.click()
+        except Exception as e:
+            raise Exception(f"点击登录失败: {e}")
+        
+        # 等待跳转
+        print("⏳ 等待登录响应...")
+        time.sleep(5)
+        
+        # 检查登录结果
+        current_url = self.page.url
+        print(f"🔗 当前URL: {current_url}")
+        
+        # 情况1: 直接成功
+        if "dashboard" in current_url or "servers" in current_url:
+            print("✅ 登录成功")
+            return True
+        
+        # 情况2: 仍在登录页，可能需要二次处理
+        if "login" in current_url:
+            print("🔄 检测到仍在登录页，尝试二次处理...")
+            
+            # 检查错误信息
+            try:
+                error_elem = self.page.ele('css:.alert-danger, .error-message, .text-danger', timeout=3)
+                if error_elem:
+                    error_text = error_elem.text
+                    raise Exception(f"登录错误: {error_text}")
+            except Exception as e:
+                if "登录错误" in str(e):
+                    raise
+            
+            # 再次处理CF
+            try:
+                self.handle_cloudflare()
+            except:
+                pass
             
             # 再次点击登录
             try:
-                page.ele('css:button[type="submit"]').click()
+                submit_btn = self.page.ele('css:button[type="submit"]', timeout=5)
+                submit_btn.click()
                 time.sleep(5)
                 
-                if "dashboard" in page.url or "servers" in page.url:
-                    login_success = True
+                if "dashboard" in self.page.url or "servers" in self.page.url:
                     print("✅ 二次登录成功")
+                    return True
             except:
                 pass
         
-        if not login_success:
-            # 检查是否有 Continue 按钮（说明已登录但需确认）
-            try:
-                page.ele('text=Continue to dashboard', timeout=3)
-                login_success = True
-                print("✅ 发现 Continue 按钮，登录成功")
-            except:
-                pass
-        
-        if not login_success:
-            raise Exception("登录失败")
-        
-        # 截图2: 登录成功
-        shot = take_screenshot(page, "step2_logged_in")
-        if shot:
-            send_telegram_photo(shot, "📸 登录成功")
-        
-        # ========== 步骤 6: 点击 Continue to dashboard ==========
-        print("6. 点击 Continue...")
-        
+        # 情况3: 需要点击Continue
         try:
-            continue_btn = page.ele('text=Continue to dashboard', timeout=5)
+            continue_btn = self.page.ele('text=Continue to dashboard', timeout=5)
+            print("✅ 发现Continue按钮")
+            return True
+        except:
+            pass
+        
+        raise Exception("登录失败，无法进入Dashboard")
+    
+    def navigate_to_server(self):
+        """导航到服务器面板"""
+        print("\n🖥️ 导航到服务器...")
+        
+        # 点击Continue（如果有）
+        try:
+            continue_btn = self.page.ele('text=Continue to dashboard', timeout=5)
             continue_btn.click()
+            print("✅ 点击Continue")
             time.sleep(3)
         except:
-            print("ℹ️ 无需点击 Continue，继续...")
+            print("ℹ️ 无需点击Continue")
         
-        # 截图3: Dashboard
-        shot = take_screenshot(page, "step3_dashboard")
-        if shot:
-            send_telegram_photo(shot, "📸 Dashboard")
+        self.screenshot("04_dashboard")
+        self.wx_bot.send_image(self.screenshots[-1])
         
-        # ========== 步骤 7: 点击 Open Panel ==========
-        print("7. 点击 Open Panel...")
+        # 查找服务器
+        print("🔍 查找服务器...")
+        selectors = [
+            'text=webapphost',
+            'text=Open Panel',
+            'css:[data-server-name]',
+            'css:.server-card',
+            'css:.instance-card',
+            'css:[href*="panel"]'
+        ]
         
-        # 查找服务器卡片（参考第二张图的结构）
-        # 可能需要先找到 webapphost 卡片
-        try:
-            # 尝试直接点击 Open Panel
-            open_panel = page.ele('text=Open Panel', timeout=10)
-            open_panel.click()
-            time.sleep(5)
-        except:
-            # 如果找不到，可能需要先点击服务器卡片
-            print("🔄 尝试查找服务器卡片...")
+        found = False
+        for selector in selectors:
             try:
-                # 根据第二张图，点击 webapphost 卡片进入
-                webapphost = page.ele('text=webapphost', timeout=5)
-                webapphost.click()
-                time.sleep(3)
-                
-                # 然后再找 Open Panel
-                open_panel = page.ele('text=Open Panel', timeout=5)
-                open_panel.click()
-                time.sleep(5)
-            except Exception as e:
-                print(f"⚠️ 查找 Open Panel 失败: {e}")
-                raise
+                elem = self.page.ele(selector, timeout=3)
+                if elem:
+                    print(f"✅ 找到元素: {selector}")
+                    
+                    if "Open Panel" in selector:
+                        elem.click()
+                    else:
+                        elem.click()
+                        time.sleep(2)
+                        # 点击后查找Open Panel
+                        panel_btn = self.page.ele('text=Open Panel', timeout=5)
+                        panel_btn.click()
+                    
+                    found = True
+                    time.sleep(5)
+                    break
+            except:
+                continue
         
-        # ========== 步骤 8: 切换到新标签页 ==========
-        print("8. 检查新标签页...")
-        tabs = page.tabs
-        print(f"📑 当前有 {len(tabs)} 个标签页")
+        if not found:
+            raise Exception("未找到服务器入口")
         
+        # 处理新标签页
+        tabs = self.page.tabs
         if len(tabs) > 1:
-            page = tabs[-1]
-            print(f"🔗 切换到新标签: {page.url}")
+            self.page = tabs[-1]
+            print(f"🔗 切换到新标签: {self.page.url}")
             time.sleep(3)
+            
+            # 新标签可能有新的CF验证
+            try:
+                self.handle_cloudflare()
+            except:
+                pass
         
-        # 截图4: 控制面板
-        shot = take_screenshot(page, "step4_panel")
-        if shot:
-            send_telegram_photo(shot, "📸 控制面板")
-        
-        # ========== 步骤 9: 抓取数据 ==========
-        print("9. 抓取数据...")
+        return self.page
+    
+    def extract_server_data(self):
+        """提取服务器数据"""
+        print("\n📊 提取数据...")
         time.sleep(3)
         
-        data = extract_data(page)
+        data = {
+            'uptime': 'N/A',
+            'cpu_load': 'N/A',
+            'memory': 'N/A',
+            'disk': 'N/A',
+            'address': 'N/A',
+            'status': 'N/A',
+            'hostname': 'N/A'
+        }
+        
+        try:
+            html = self.page.html
+            text = self.page.text
+            
+            # 正则提取
+            patterns = {
+                'uptime': r'Uptime[:\s]+(\d+d?\s+\d+h\s+\d+m\s+\d+s|\d+h\s+\d+m\s+\d+s)',
+                'cpu_load': r'CPU\s*Load[:\s]+([\d.]+%?\s*/\s*[\d.]+%?)',
+                'memory': r'Memory[:\s]+([\d.]+\s*(?:MiB|GiB|MB|GB)\s*/\s*[\d.]+\s*(?:MiB|GiB|MB|GB))',
+                'disk': r'Disk[:\s]+([\d.]+\s*(?:MiB|GiB|MB|GB)\s*/\s*[\d.]+\s*(?:MiB|GiB|MB|GB))',
+                'address': r'(node\d+\.lunes\.host:\d+)',
+                'status': r'Status[:\s]+(\w+)',
+                'hostname': r'Hostname[:\s]+(\w+)'
+            }
+            
+            for key, pattern in patterns.items():
+                matches = re.findall(pattern, html, re.IGNORECASE)
+                if matches:
+                    data[key] = matches[0]
+                    print(f"   {key}: {data[key]}")
+            
+            # 备用：从文本中提取
+            if data['cpu_load'] == 'N/A':
+                cpu_match = re.search(r'(\d+\.\d+)\s*/\s*(\d+\.\d+)', text)
+                if cpu_match:
+                    data['cpu_load'] = f"{cpu_match.group(1)}% / {cpu_match.group(2)}%"
+            
+        except Exception as e:
+            print(f"⚠️ 数据提取警告: {e}")
+        
+        return data
+    
+    def generate_report(self, data):
+        """生成并发送报告"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Markdown报告
+        report = f"""## 🖥️ Lunes Server 监控报告
+
+📅 **时间**: `{now}`
+
+📌 **服务器信息**
+> 主机: `{data.get('hostname', 'N/A')}`
+> 地址: `{data.get('address', 'N/A')}`
+> 状态: `{data.get('status', 'Running')}`
+
+📊 **资源使用**
+> ⏱️ 运行时间: `{data.get('uptime', 'N/A')}`
+> 🔄 CPU负载: `{data.get('cpu_load', 'N/A')}`
+> 💾 内存使用: `{data.get('memory', 'N/A')}`
+> 💿 磁盘使用: `{data.get('disk', 'N/A')}`
+
+✅ **监控完成**
+"""
+        
+        self.wx_bot.send_markdown(report)
         
         # 最终截图
-        shot = take_screenshot(page, "step5_final")
+        final_shot = self.screenshot("05_final")
+        if final_shot:
+            self.wx_bot.send_image(final_shot)
         
-        # ========== 步骤 10: 发送报告 ==========
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"""🖥️ *Lunes Server 监控报告*
+        # 发送完成通知
+        self.wx_bot.send_text(f"✅ Lunes监控完成\n时间: {now}\nCPU: {data.get('cpu_load', 'N/A')}\n内存: {data.get('memory', 'N/A')}")
 
-📅 `{now}`
-
-📌 *服务器*
-• 地址: `{data.get('address', 'N/A')}`
-
-📊 *资源使用*
-⏱️ Uptime: `{data.get('uptime', 'N/A')}`
-🔄 CPU Load: `{data.get('cpu_load', 'N/A')}`
-💾 Memory: `{data.get('memory', 'N/A')}`
-💿 Disk: `{data.get('disk', 'N/A')}`
-
-✅ 完成
-"""
-        send_telegram(msg)
+# ==================== 主程序 ====================
+def main():
+    print(f"\n{'='*50}")
+    print(f"🚀 Lunes Server Monitor - 2captcha版")
+    print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}\n")
+    
+    # 初始化组件
+    wx_bot = WeChatBot(WECHAT_WEBHOOK_KEY)
+    cf_solver = CloudflareSolver(API_KEY_2CAPTCHA)
+    browser = BrowserManager(headless=True)
+    
+    # 发送启动通知
+    wx_bot.send_text(f"🚀 Lunes监控启动\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    try:
+        # 启动浏览器
+        browser.setup()
+        page = browser.get_page()
         
-        if shot:
-            send_telegram_photo(shot, "📸 最终状态")
+        # 初始化自动化
+        lunes = LunesAutomation(page, cf_solver, wx_bot)
         
-        print("✅ 全部完成！")
+        # 执行登录
+        lunes.login()
+        
+        # 导航到服务器
+        page = lunes.navigate_to_server()
+        lunes.page = page  # 更新page引用
+        
+        # 提取数据
+        data = lunes.extract_server_data()
+        
+        # 生成报告
+        lunes.generate_report(data)
+        
+        print("\n✅ 监控流程完成")
         return True
         
     except Exception as e:
         error_msg = f"❌ 监控失败: {str(e)}"
-        print(error_msg)
+        print(f"\n{error_msg}")
         
+        # 错误截图
         try:
-            error_shot = take_screenshot(page, "error")
-            if error_shot:
-                send_telegram_photo(error_shot, f"❌ 错误: {str(e)}")
+            if 'lunes' in locals():
+                error_shot = lunes.screenshot("error")
+                if error_shot:
+                    wx_bot.send_image(error_shot)
         except:
             pass
         
-        send_telegram(error_msg)
+        wx_bot.send_text(f"❌ Lunes监控异常\n错误: {str(e)}\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         return False
         
     finally:
-        print("🧹 清理浏览器...")
-        page.quit()
+        print("\n🧹 清理资源...")
+        browser.close()
+        # 清理截图文件
+        try:
+            for f in os.listdir('.'):
+                if f.endswith('.png') and f[0].isdigit():
+                    os.remove(f)
+                    print(f"   删除: {f}")
+        except:
+            pass
 
 if __name__ == "__main__":
-    success = monitor()
+    success = main()
     exit(0 if success else 1)
