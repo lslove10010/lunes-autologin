@@ -94,11 +94,72 @@ def take_screenshot(page, filename):
     # print(f"截图已保存: {screenshot_path}")
     return screenshot_path
 
-# extract_server_stats 和 format_stats_message 函数保持不变
-# （但 format_stats_message 现在只用于构造文本内容，不再是 markdown）
+def extract_server_stats(page):
+    """提取服务器详情页的统计信息"""
+    stats = {}
+   
+    try:
+        # 等待关键元素出现
+        page.wait_for_selector("text=Uptime", timeout=15000)
+       
+        # 尝试多种方式提取（更鲁棒）
+        stats["address"] = page.locator("text=node22.lunes.host:3098, div:has-text('Address') ~ div").inner_text().strip() or "N/A"
+       
+        # 卡片式提取
+        cards = page.locator("div.grid > div, .stats-card, [class*='bg-'], div[class*='stat']").all()
+        for card in cards:
+            text = card.inner_text().strip()
+            if not text:
+                continue
+            if "Uptime" in text:
+                stats["uptime"] = text.replace("Uptime", "").strip() or text.split("Uptime")[-1].strip()
+            elif "CPU Load" in text:
+                stats["cpu_load"] = text.replace("CPU Load", "").strip()
+            elif "Memory" in text and "Network" not in text:
+                stats["memory"] = text.replace("Memory", "").strip()
+            elif "Disk" in text:
+                stats["disk"] = text.replace("Disk", "").strip()
+            elif "Network (Inbound)" in text or "Inbound" in text:
+                stats["network_in"] = text.replace("Network (Inbound)", "").strip()
+            elif "Network (Outbound)" in text or "Outbound" in text:
+                stats["network_out"] = text.replace("Network (Outbound)", "").strip()
+       
+        # 最后保底：如果还是空，抓整个可见文本找关键词
+        if len(stats) < 3:
+            visible_text = page.inner_text("body")
+            lines = [line.strip() for line in visible_text.splitlines() if line.strip()]
+            for i, line in enumerate(lines):
+                lower = line.lower()
+                if "uptime" in lower and i+1 < len(lines):
+                    stats["uptime"] = lines[i+1]
+                elif "cpu load" in lower and i+1 < len(lines):
+                    stats["cpu_load"] = lines[i+1]
+                elif "memory" in lower and "network" not in lower and i+1 < len(lines):
+                    stats["memory"] = lines[i+1]
+                elif "disk" in lower and i+1 < len(lines):
+                    stats["disk"] = lines[i+1]
+                elif "inbound" in lower or "network in" in lower and i+1 < len(lines):
+                    stats["network_in"] = lines[i+1]
+                elif "outbound" in lower or "network out" in lower and i+1 < len(lines):
+                    stats["network_out"] = lines[i+1]
+       
+        if not stats:
+            stats["error"] = "未能提取到任何统计数据"
+       
+    except Exception as e:
+        print(f"提取统计失败: {str(e)}")
+        stats["error"] = str(e)
+   
+    return stats
 
 def format_stats_message(stats):
     """格式化统计信息为纯文本（适合 text 消息）"""
+    # 打码 server ID 如 564fec71
+    address = stats.get('address', 'N/A')
+    if '564fec71' in address:
+        address = address.replace('564fec71', '***')
+    stats['address'] = address
+    
     lines = []
     lines.append("🖥️ 服务器状态监控")
     lines.append("")
